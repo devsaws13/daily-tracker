@@ -110,13 +110,17 @@ with tab1:
                 st.rerun()
 
     st.subheader("Action Dashboard")
-    st.write("Manage your upcoming tasks and past entries.")
+    st.write("Manage your upcoming tasks and past entries. Select a row and press Delete to remove it.")
     
-    # Fetch recent/pending data
+    # Sort logic: Pending first, then by Due Date (closest/overdue first), then Logs without Due Dates, then Completed
     result = client.execute("""
         SELECT id, is_done, log_date, due_date, done_date, category, title, details 
         FROM life_logs 
-        ORDER BY CASE WHEN is_done = 0 THEN 0 ELSE 1 END, log_date DESC
+        ORDER BY 
+            is_done ASC, 
+            CASE WHEN due_date = '' OR due_date IS NULL THEN 1 ELSE 0 END ASC,
+            due_date ASC, 
+            log_date DESC
         LIMIT 50
     """)
     
@@ -146,15 +150,14 @@ with tab1:
             # Pending but future/today, leave blank
             return [''] * len(row)
             
-        # FIX: Do not drop "temp_due" before applying the style
         styled_df = df.style.apply(highlight_due_status, axis=1)
         
-        # Make the dataframe editable so the user can click "Done"
+        # Make the dataframe editable so the user can click "Done" or Delete rows
         edited_df = st.data_editor(
             styled_df,
             column_config={
                 "ID": None, # Hide ID
-                "temp_due": None, # FIX: Hide the helper column here instead
+                "temp_due": None, # Hide the helper column
                 "Done": st.column_config.CheckboxColumn("Done?", default=False),
                 "Logged": st.column_config.TextColumn(disabled=True),
                 "Due Date": st.column_config.TextColumn(disabled=True),
@@ -165,31 +168,48 @@ with tab1:
             },
             use_container_width=True,
             hide_index=True,
+            num_rows="dynamic", # Enables row deletion in the UI
             key="dashboard_editor"
         )
         
-        # Check if the user toggled the "Done" checkbox
-        # FIX: Compare against the full df since we didn't drop the column
+        # Check if the user toggled the "Done" checkbox or deleted a row
         if not edited_df.equals(df):
-            for i, row in edited_df.iterrows():
-                original_done = df.loc[i, "Done"]
-                new_done = row["Done"]
+            original_ids = set(df['ID'].dropna().tolist())
+            current_ids = set(edited_df['ID'].dropna().tolist())
+            
+            # 1. Handle Deletions
+            deleted_ids = original_ids - current_ids
+            for del_id in deleted_ids:
+                client.execute("DELETE FROM life_logs WHERE id = ?", [del_id])
                 
-                # If a pending item was just marked as Done
-                if not original_done and new_done:
-                    client.execute(
-                        "UPDATE life_logs SET is_done = 1, done_date = ? WHERE id = ?",
-                        [str(today), df.loc[i, "ID"]]
-                    )
-                    st.rerun()
+            # 2. Handle Checkbox Status Changes
+            updates_made = False
+            for _, row in edited_df.iterrows():
+                row_id = row["ID"]
+                if row_id in original_ids: # Ensure we only update rows that weren't just deleted
+                    original_row = df[df["ID"] == row_id].iloc[0]
+                    original_done = original_row["Done"]
+                    new_done = row["Done"]
                     
-                # If a finished item was accidentally unmarked
-                elif original_done and not new_done:
-                    client.execute(
-                        "UPDATE life_logs SET is_done = 0, done_date = '' WHERE id = ?",
-                        [df.loc[i, "ID"]]
-                    )
-                    st.rerun()
+                    # If a pending item was just marked as Done
+                    if not original_done and new_done:
+                        client.execute(
+                            "UPDATE life_logs SET is_done = 1, done_date = ? WHERE id = ?",
+                            [str(today), row_id]
+                        )
+                        updates_made = True
+                        
+                    # If a finished item was accidentally unmarked
+                    elif original_done and not new_done:
+                        client.execute(
+                            "UPDATE life_logs SET is_done = 0, done_date = '' WHERE id = ?",
+                            [row_id]
+                        )
+                        updates_made = True
+
+            # Rerun the app if any database state changed
+            if deleted_ids or updates_made:
+                st.rerun()
     else:
         st.info("Your dashboard is empty.")
 
