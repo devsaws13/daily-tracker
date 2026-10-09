@@ -130,8 +130,8 @@ with tab1:
         # Convert sqlite integers back to booleans
         df["Done"] = df["Done"].astype(bool)
         
-        # Insert an explicit Delete column at the very beginning (index 0) for mobile taps
-        df.insert(0, "Delete", False)
+        # Insert a selection column at the very beginning
+        df.insert(0, "Select", False)
         
         today = date.today()
         df['temp_due'] = pd.to_datetime(df['Due Date']).dt.date
@@ -157,7 +157,7 @@ with tab1:
             column_config={
                 "ID": None, # Hide ID
                 "temp_due": None, # Hide the helper column
-                "Delete": st.column_config.CheckboxColumn("🗑️ Delete", default=False),
+                "Select": st.column_config.CheckboxColumn("🗑️ Select", default=False),
                 "Done": st.column_config.CheckboxColumn("Done?", default=False),
                 "Logged": st.column_config.TextColumn(disabled=True),
                 "Due Date": st.column_config.TextColumn(disabled=True),
@@ -171,15 +171,8 @@ with tab1:
             key="dashboard_editor"
         )
         
-        # Detect if a Delete checkbox was checked
-        if edited_df["Delete"].any():
-            deletions = edited_df[edited_df["Delete"] == True]
-            for del_id in deletions["ID"]:
-                client.execute("DELETE FROM life_logs WHERE id = ?", [int(del_id)])
-            st.rerun()
-            
-        # Detect if a Done checkbox was changed
-        elif not edited_df["Done"].equals(df["Done"]):
+        # 1. Handle Checkbox Status Changes for "Done"
+        if not edited_df["Done"].equals(df["Done"]):
             updates_made = False
             for i, row in edited_df.iterrows():
                 row_id = row["ID"]
@@ -202,6 +195,16 @@ with tab1:
 
             if updates_made:
                 st.rerun()
+
+        # 2. Handle Safe Deletions via Button
+        if edited_df["Select"].any():
+            deletions = edited_df[edited_df["Select"] == True]
+            st.error(f"⚠️ You have selected {len(deletions)} log(s) for deletion. This action cannot be undone.")
+            if st.button("Confirm Deletion", type="primary", key="dash_del_btn"):
+                for del_id in deletions["ID"]:
+                    client.execute("DELETE FROM life_logs WHERE id = ?", [int(del_id)])
+                st.rerun()
+
     else:
         st.info("Your dashboard is empty.")
 
@@ -237,14 +240,14 @@ with tab2:
                    filtered_df['Details'].str.contains(search_text, case=False, na=False)
             filtered_df = filtered_df[mask]
 
-        # Insert an explicit Delete column at the very beginning (index 0)
-        filtered_df.insert(0, "Delete", False)
+        # Insert an explicit Select column
+        filtered_df.insert(0, "Select", False)
 
         edited_search_df = st.data_editor(
             filtered_df,
             column_config={
                 "ID": None,
-                "Delete": st.column_config.CheckboxColumn("🗑️ Delete", default=False),
+                "Select": st.column_config.CheckboxColumn("🗑️ Select", default=False),
                 "Logged": st.column_config.TextColumn(disabled=True),
                 "Due": st.column_config.TextColumn(disabled=True),
                 "Finished": st.column_config.TextColumn(disabled=True),
@@ -257,12 +260,14 @@ with tab2:
             key="search_editor"
         )
         
-        # Detect if a Delete checkbox was checked in the Search results
-        if edited_search_df["Delete"].any():
-            deletions = edited_search_df[edited_search_df["Delete"] == True]
-            for del_id in deletions["ID"]:
-                client.execute("DELETE FROM life_logs WHERE id = ?", [int(del_id)])
-            st.rerun()
+        # Display the confirmation button if any item is selected for deletion
+        if edited_search_df["Select"].any():
+            deletions = edited_search_df[edited_search_df["Select"] == True]
+            st.error(f"⚠️ You have selected {len(deletions)} log(s) for deletion. This action cannot be undone.")
+            if st.button("Confirm Deletion", type="primary", key="search_del_btn"):
+                for del_id in deletions["ID"]:
+                    client.execute("DELETE FROM life_logs WHERE id = ?", [int(del_id)])
+                st.rerun()
 
     else:
         st.info("No logs found. Start typing in the Log Entry tab!")
