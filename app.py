@@ -136,15 +136,18 @@ with tab1:
         today = date.today()
         df['temp_due'] = pd.to_datetime(df['Due Date']).dt.date
         
+        # FIX: Explicitly convert dates to strings right before rendering to prevent JS Timestamp bug
+        df['Logged'] = pd.to_datetime(df['Logged']).dt.strftime('%Y-%m-%d')
+        df['Due Date'] = pd.to_datetime(df['Due Date'], errors='coerce').dt.strftime('%Y-%m-%d').fillna('')
+        df['Finished On'] = pd.to_datetime(df['Finished On'], errors='coerce').dt.strftime('%Y-%m-%d').fillna('')
+        
         def highlight_due_status(row):
             is_done = row['Done']
             due_date_val = row['temp_due']
             
-            # If it's done, leave it plain
             if is_done:
                 return [''] * len(row)
             
-            # If it's pending and past due, color it light pink
             if pd.notna(due_date_val) and due_date_val < today:
                 return ['background-color: #FFD1DC; color: black'] * len(row)
                 
@@ -155,10 +158,11 @@ with tab1:
         edited_df = st.data_editor(
             styled_df,
             column_config={
-                "ID": None, # Hide ID
-                "temp_due": None, # Hide the helper column
-                "Select": st.column_config.CheckboxColumn("🗑️ Select", default=False),
-                "Done": st.column_config.CheckboxColumn("Done?", default=False),
+                "ID": None, 
+                "temp_due": None, 
+                # Set width to small for checkboxes to tighten them up
+                "Select": st.column_config.CheckboxColumn("🗑️ Select", default=False, width="small"),
+                "Done": st.column_config.CheckboxColumn("Done?", default=False, width="small"),
                 "Logged": st.column_config.TextColumn(disabled=True),
                 "Due Date": st.column_config.TextColumn(disabled=True),
                 "Finished On": st.column_config.TextColumn(disabled=True),
@@ -166,7 +170,7 @@ with tab1:
                 "Title": st.column_config.TextColumn(disabled=True),
                 "Details": st.column_config.TextColumn(disabled=True)
             },
-            use_container_width=True,
+            use_container_width=False, # FIX: Let columns hug their content instead of stretching
             hide_index=True,
             key="dashboard_editor"
         )
@@ -216,6 +220,8 @@ with tab2:
     
     if result.rows:
         df = pd.DataFrame(result.rows, columns=["ID", "Logged", "Due", "Finished", "Category", "Title", "Details"])
+        
+        # Keep as datetime for correct filtering
         df['Logged'] = pd.to_datetime(df['Logged']).dt.date
         
         f_col1, f_col2, f_col3 = st.columns([1, 1, 2])
@@ -240,14 +246,18 @@ with tab2:
                    filtered_df['Details'].str.contains(search_text, case=False, na=False)
             filtered_df = filtered_df[mask]
 
-        # Insert an explicit Select column
-        filtered_df.insert(0, "Select", False)
+        # FIX: Create a display copy and convert dates to foolproof text strings 
+        display_df = filtered_df.copy()
+        display_df.insert(0, "Select", False)
+        display_df['Logged'] = pd.to_datetime(display_df['Logged']).dt.strftime('%Y-%m-%d')
+        display_df['Due'] = pd.to_datetime(display_df['Due'], errors='coerce').dt.strftime('%Y-%m-%d').fillna('')
+        display_df['Finished'] = pd.to_datetime(display_df['Finished'], errors='coerce').dt.strftime('%Y-%m-%d').fillna('')
 
         edited_search_df = st.data_editor(
-            filtered_df,
+            display_df,
             column_config={
                 "ID": None,
-                "Select": st.column_config.CheckboxColumn("🗑️ Select", default=False),
+                "Select": st.column_config.CheckboxColumn("🗑️ Select", default=False, width="small"),
                 "Logged": st.column_config.TextColumn(disabled=True),
                 "Due": st.column_config.TextColumn(disabled=True),
                 "Finished": st.column_config.TextColumn(disabled=True),
@@ -255,7 +265,7 @@ with tab2:
                 "Title": st.column_config.TextColumn(disabled=True),
                 "Details": st.column_config.TextColumn(disabled=True)
             },
-            use_container_width=True,
+            use_container_width=False, # FIX: Hug content size
             hide_index=True,
             key="search_editor"
         )
