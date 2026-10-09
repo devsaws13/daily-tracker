@@ -110,7 +110,7 @@ with tab1:
                 st.rerun()
 
     st.subheader("Action Dashboard")
-    st.write("Manage your upcoming tasks and past entries. Select a row and press Delete to remove it.")
+    st.write("Manage your upcoming tasks and past entries.")
     
     # Sort logic: Pending first, then by Due Date (closest/overdue first), then Logs without Due Dates, then Completed
     result = client.execute("""
@@ -127,19 +127,20 @@ with tab1:
     if result.rows:
         df = pd.DataFrame(result.rows, columns=["ID", "Done", "Logged", "Due Date", "Finished On", "Category", "Title", "Details"])
         
-        # Convert sqlite integers back to booleans for the checkbox UI
+        # Convert sqlite integers back to booleans
         df["Done"] = df["Done"].astype(bool)
         
-        today = date.today()
+        # Insert an explicit Delete column at the very beginning (index 0) for mobile taps
+        df.insert(0, "Delete", False)
         
-        # Convert date columns for coloring logic
+        today = date.today()
         df['temp_due'] = pd.to_datetime(df['Due Date']).dt.date
         
         def highlight_due_status(row):
             is_done = row['Done']
             due_date_val = row['temp_due']
             
-            # If it's done, do not highlight it (leave it plain)
+            # If it's done, leave it plain
             if is_done:
                 return [''] * len(row)
             
@@ -147,17 +148,16 @@ with tab1:
             if pd.notna(due_date_val) and due_date_val < today:
                 return ['background-color: #FFD1DC; color: black'] * len(row)
                 
-            # Pending but future/today, leave blank
             return [''] * len(row)
             
         styled_df = df.style.apply(highlight_due_status, axis=1)
         
-        # Make the dataframe editable so the user can click "Done" or Delete rows
         edited_df = st.data_editor(
             styled_df,
             column_config={
                 "ID": None, # Hide ID
                 "temp_due": None, # Hide the helper column
+                "Delete": st.column_config.CheckboxColumn("🗑️ Delete", default=False),
                 "Done": st.column_config.CheckboxColumn("Done?", default=False),
                 "Logged": st.column_config.TextColumn(disabled=True),
                 "Due Date": st.column_config.TextColumn(disabled=True),
@@ -168,54 +168,46 @@ with tab1:
             },
             use_container_width=True,
             hide_index=True,
-            num_rows="dynamic", # Enables row deletion in the UI
             key="dashboard_editor"
         )
         
-        # Check if the user toggled the "Done" checkbox or deleted a row
-        if not edited_df.equals(df):
-            original_ids = set(df['ID'].dropna().tolist())
-            current_ids = set(edited_df['ID'].dropna().tolist())
+        # Detect if a Delete checkbox was checked
+        if edited_df["Delete"].any():
+            deletions = edited_df[edited_df["Delete"] == True]
+            for del_id in deletions["ID"]:
+                client.execute("DELETE FROM life_logs WHERE id = ?", [int(del_id)])
+            st.rerun()
             
-            # 1. Handle Deletions
-            deleted_ids = original_ids - current_ids
-            for del_id in deleted_ids:
-                client.execute("DELETE FROM life_logs WHERE id = ?", [del_id])
-                
-            # 2. Handle Checkbox Status Changes
+        # Detect if a Done checkbox was changed
+        elif not edited_df["Done"].equals(df["Done"]):
             updates_made = False
-            for _, row in edited_df.iterrows():
+            for i, row in edited_df.iterrows():
                 row_id = row["ID"]
-                if row_id in original_ids: # Ensure we only update rows that weren't just deleted
-                    original_row = df[df["ID"] == row_id].iloc[0]
-                    original_done = original_row["Done"]
-                    new_done = row["Done"]
+                original_done = df.loc[i, "Done"]
+                new_done = row["Done"]
+                
+                if not original_done and new_done:
+                    client.execute(
+                        "UPDATE life_logs SET is_done = 1, done_date = ? WHERE id = ?",
+                        [str(today), row_id]
+                    )
+                    updates_made = True
                     
-                    # If a pending item was just marked as Done
-                    if not original_done and new_done:
-                        client.execute(
-                            "UPDATE life_logs SET is_done = 1, done_date = ? WHERE id = ?",
-                            [str(today), row_id]
-                        )
-                        updates_made = True
-                        
-                    # If a finished item was accidentally unmarked
-                    elif original_done and not new_done:
-                        client.execute(
-                            "UPDATE life_logs SET is_done = 0, done_date = '' WHERE id = ?",
-                            [row_id]
-                        )
-                        updates_made = True
+                elif original_done and not new_done:
+                    client.execute(
+                        "UPDATE life_logs SET is_done = 0, done_date = '' WHERE id = ?",
+                        [row_id]
+                    )
+                    updates_made = True
 
-            # Rerun the app if any database state changed
-            if deleted_ids or updates_made:
+            if updates_made:
                 st.rerun()
     else:
         st.info("Your dashboard is empty.")
 
 with tab2:
     st.subheader("Effortless Search")
-    st.write("Search all past entries. Select a row and press Delete to remove it.")
+    st.write("Search all past entries.")
     
     result = client.execute("SELECT id, log_date, due_date, done_date, category, title, details FROM life_logs ORDER BY log_date DESC")
     
@@ -245,11 +237,14 @@ with tab2:
                    filtered_df['Details'].str.contains(search_text, case=False, na=False)
             filtered_df = filtered_df[mask]
 
-        # Use data_editor instead of dataframe to enable deletion
+        # Insert an explicit Delete column at the very beginning (index 0)
+        filtered_df.insert(0, "Delete", False)
+
         edited_search_df = st.data_editor(
             filtered_df,
             column_config={
                 "ID": None,
+                "Delete": st.column_config.CheckboxColumn("🗑️ Delete", default=False),
                 "Logged": st.column_config.TextColumn(disabled=True),
                 "Due": st.column_config.TextColumn(disabled=True),
                 "Finished": st.column_config.TextColumn(disabled=True),
@@ -259,21 +254,15 @@ with tab2:
             },
             use_container_width=True,
             hide_index=True,
-            num_rows="dynamic", # Enables row deletion in the UI
             key="search_editor"
         )
         
-        # Check if the user deleted a row in the search results
-        if not edited_search_df.equals(filtered_df):
-            original_search_ids = set(filtered_df['ID'].dropna().tolist())
-            current_search_ids = set(edited_search_df['ID'].dropna().tolist())
-            
-            deleted_search_ids = original_search_ids - current_search_ids
-            
-            if deleted_search_ids:
-                for del_id in deleted_search_ids:
-                    client.execute("DELETE FROM life_logs WHERE id = ?", [del_id])
-                st.rerun()
+        # Detect if a Delete checkbox was checked in the Search results
+        if edited_search_df["Delete"].any():
+            deletions = edited_search_df[edited_search_df["Delete"] == True]
+            for del_id in deletions["ID"]:
+                client.execute("DELETE FROM life_logs WHERE id = ?", [int(del_id)])
+            st.rerun()
 
     else:
         st.info("No logs found. Start typing in the Log Entry tab!")
