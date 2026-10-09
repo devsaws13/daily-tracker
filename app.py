@@ -139,9 +139,9 @@ with tab1:
             is_done = row['Done']
             due_date_val = row['temp_due']
             
-            # If it's done, color it light green
+            # If it's done, do not highlight it (leave it plain)
             if is_done:
-                return ['background-color: #E8F5E9; color: black'] * len(row)
+                return [''] * len(row)
             
             # If it's pending and past due, color it light pink
             if pd.notna(due_date_val) and due_date_val < today:
@@ -215,6 +215,7 @@ with tab1:
 
 with tab2:
     st.subheader("Effortless Search")
+    st.write("Search all past entries. Select a row and press Delete to remove it.")
     
     result = client.execute("SELECT id, log_date, due_date, done_date, category, title, details FROM life_logs ORDER BY log_date DESC")
     
@@ -244,7 +245,36 @@ with tab2:
                    filtered_df['Details'].str.contains(search_text, case=False, na=False)
             filtered_df = filtered_df[mask]
 
-        st.dataframe(filtered_df.drop(columns=["ID"]), use_container_width=True, hide_index=True)
+        # Use data_editor instead of dataframe to enable deletion
+        edited_search_df = st.data_editor(
+            filtered_df,
+            column_config={
+                "ID": None,
+                "Logged": st.column_config.TextColumn(disabled=True),
+                "Due": st.column_config.TextColumn(disabled=True),
+                "Finished": st.column_config.TextColumn(disabled=True),
+                "Category": st.column_config.TextColumn(disabled=True),
+                "Title": st.column_config.TextColumn(disabled=True),
+                "Details": st.column_config.TextColumn(disabled=True)
+            },
+            use_container_width=True,
+            hide_index=True,
+            num_rows="dynamic", # Enables row deletion in the UI
+            key="search_editor"
+        )
+        
+        # Check if the user deleted a row in the search results
+        if not edited_search_df.equals(filtered_df):
+            original_search_ids = set(filtered_df['ID'].dropna().tolist())
+            current_search_ids = set(edited_search_df['ID'].dropna().tolist())
+            
+            deleted_search_ids = original_search_ids - current_search_ids
+            
+            if deleted_search_ids:
+                for del_id in deleted_search_ids:
+                    client.execute("DELETE FROM life_logs WHERE id = ?", [del_id])
+                st.rerun()
+
     else:
         st.info("No logs found. Start typing in the Log Entry tab!")
 
