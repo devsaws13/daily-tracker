@@ -16,6 +16,7 @@ def get_db():
 
 client = get_db()
 
+# Create table
 client.execute("""
     CREATE TABLE IF NOT EXISTS life_logs (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -23,10 +24,20 @@ client.execute("""
         category TEXT,
         title TEXT,
         details TEXT,
+        due_date DATE,
+        is_done INTEGER DEFAULT 0,
+        done_date DATE,
         reminder_date DATE,
         reminder_sent INTEGER DEFAULT 0
     )
 """)
+
+# Check and upgrade existing table if missing the new columns
+existing_cols = [col[1] for col in client.execute("PRAGMA table_info(life_logs)").rows]
+if "due_date" not in existing_cols:
+    client.execute("ALTER TABLE life_logs ADD COLUMN due_date DATE")
+    client.execute("ALTER TABLE life_logs ADD COLUMN is_done INTEGER DEFAULT 0")
+    client.execute("ALTER TABLE life_logs ADD COLUMN done_date DATE")
 
 # --- 2. Email Notification Function ---
 def send_email_reminder(to_email, subject, body):
@@ -39,7 +50,6 @@ def send_email_reminder(to_email, subject, body):
         msg['From'] = sender
         msg['To'] = to_email
 
-        # Using Gmail SMTP as standard
         with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
             server.login(sender, password)
             server.send_message(msg)
@@ -51,48 +61,144 @@ def send_email_reminder(to_email, subject, body):
 # --- 3. UI Layout ---
 st.title("📓 Daily Life Logger")
 
-tab1, tab2, tab3 = st.tabs(["📝 Log Entry", "🔍 Search & Filter", "⏰ Reminders"])
+tab1, tab2, tab3 = st.tabs(["📝 Dashboard & Log Entry", "🔍 Search & Filter", "⏰ Reminders"])
 
 # DEFAULT CATEGORIES
 categories = ["🚗 Vehicle", "💊 Health & Medical", "✈️ Travel", "💼 Work", "🏠 Home", "🌱 Other"]
 
 with tab1:
-    with st.container(border=True):
+    with st.expander("➕ Create New Log", expanded=True):
         col1, col2 = st.columns(2)
         
         with col1:
-            log_date = st.date_input("Date", value=date.today())
+            log_date = st.date_input("Entry Date", value=date.today())
             category = st.selectbox("Category", categories)
-            title = st.text_input("Title", placeholder="e.g., Wagon R CNG Service, Dental checkup, Train to Rajkot")
+            title = st.text_input("Title", placeholder="e.g., Wagon R CNG Service, Dental checkup...")
             
         with col2:
-            details = st.text_area("Details & Notes", placeholder="Mechanic details, medicine dosage, booking PNR...")
-            set_reminder = st.checkbox("Set a future reminder?")
+            details = st.text_area("Details & Notes", placeholder="Mechanic details, medicine dosage, booking PNR...", height=115)
+        
+        st.divider()
+        st.write("📅 **Optional Scheduling**")
+        scol1, scol2 = st.columns(2)
+        with scol1:
+            set_due = st.checkbox("Set a Due Date?")
+            due_date = st.date_input("Due Date", value=date.today()) if set_due else None
+        with scol2:
+            set_reminder = st.checkbox("Set an Email Reminder?")
             reminder_date = st.date_input("Reminder Date", value=date.today()) if set_reminder else None
 
         if st.button("Save Log", type="primary", use_container_width=True):
             if not title:
                 st.warning("Title is required.")
             else:
+                due_date_str = str(due_date) if set_due else ""
                 rem_date_str = str(reminder_date) if set_reminder else ""
+                
+                # If there's no due date, it's essentially "Done" immediately at the time of logging.
+                # If there is a due date, it starts as pending (is_done = 0).
+                is_done_val = 0 if set_due else 1
+                done_date_val = str(log_date) if not set_due else ""
+                
                 client.execute(
-                    "INSERT INTO life_logs (log_date, category, title, details, reminder_date) VALUES (?, ?, ?, ?, ?)",
-                    [str(log_date), category, title, details, rem_date_str]
+                    """INSERT INTO life_logs 
+                       (log_date, category, title, details, due_date, is_done, done_date, reminder_date) 
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    [str(log_date), category, title, details, due_date_str, is_done_val, done_date_val, rem_date_str]
                 )
                 st.success("Log saved successfully!")
                 st.rerun()
 
+    st.subheader("Action Dashboard")
+    st.write("Manage your upcoming tasks and past entries.")
+    
+    # Fetch recent/pending data
+    result = client.execute("""
+        SELECT id, is_done, log_date, due_date, done_date, category, title, details 
+        FROM life_logs 
+        ORDER BY CASE WHEN is_done = 0 THEN 0 ELSE 1 END, log_date DESC
+        LIMIT 50
+    """)
+    
+    if result.rows:
+        df = pd.DataFrame(result.rows, columns=["ID", "Done", "Logged", "Due Date", "Finished On", "Category", "Title", "Details"])
+        
+        # Convert sqlite integers back to booleans for the checkbox UI
+        df["Done"] = df["Done"].astype(bool)
+        
+        today = date.today()
+        
+        # Convert date columns for coloring logic
+        df['temp_due'] = pd.to_datetime(df['Due Date']).dt.date
+        
+        def highlight_due_status(row):
+            is_done = row['Done']
+            due_date_val = row['temp_due']
+            
+            # If it's done, color it light green
+            if is_done:
+                return ['background-color: #E8F5E9; color: black'] * len(row)
+            
+            # If it's pending and past due, color it light pink
+            if pd.notna(due_date_val) and due_date_val < today:
+                return ['background-color: #FFD1DC; color: black'] * len(row)
+                
+            # Pending but future/today, leave blank
+            return [''] * len(row)
+            
+        styled_df = df.drop(columns=["temp_due"]).style.apply(highlight_due_status, axis=1)
+        
+        # Make the dataframe editable so the user can click "Done"
+        edited_df = st.data_editor(
+            styled_df,
+            column_config={
+                "ID": None, # Hide ID
+                "Done": st.column_config.CheckboxColumn("Done?", default=False),
+                "Logged": st.column_config.TextColumn(disabled=True),
+                "Due Date": st.column_config.TextColumn(disabled=True),
+                "Finished On": st.column_config.TextColumn(disabled=True),
+                "Category": st.column_config.TextColumn(disabled=True),
+                "Title": st.column_config.TextColumn(disabled=True),
+                "Details": st.column_config.TextColumn(disabled=True)
+            },
+            use_container_width=True,
+            hide_index=True,
+            key="dashboard_editor"
+        )
+        
+        # Check if the user toggled the "Done" checkbox
+        if not edited_df.equals(df.drop(columns=["temp_due"])):
+            for i, row in edited_df.iterrows():
+                original_done = df.loc[i, "Done"]
+                new_done = row["Done"]
+                
+                # If a pending item was just marked as Done
+                if not original_done and new_done:
+                    client.execute(
+                        "UPDATE life_logs SET is_done = 1, done_date = ? WHERE id = ?",
+                        [str(today), df.loc[i, "ID"]]
+                    )
+                    st.rerun()
+                    
+                # If a finished item was accidentally unmarked
+                elif original_done and not new_done:
+                    client.execute(
+                        "UPDATE life_logs SET is_done = 0, done_date = '' WHERE id = ?",
+                        [df.loc[i, "ID"]]
+                    )
+                    st.rerun()
+    else:
+        st.info("Your dashboard is empty.")
+
 with tab2:
     st.subheader("Effortless Search")
     
-    # Fetch all logs
-    result = client.execute("SELECT id, log_date, category, title, details, reminder_date FROM life_logs ORDER BY log_date DESC")
+    result = client.execute("SELECT id, log_date, due_date, done_date, category, title, details FROM life_logs ORDER BY log_date DESC")
     
     if result.rows:
-        df = pd.DataFrame(result.rows, columns=["ID", "Date", "Category", "Title", "Details", "Reminder Date"])
-        df['Date'] = pd.to_datetime(df['Date']).dt.date
+        df = pd.DataFrame(result.rows, columns=["ID", "Logged", "Due", "Finished", "Category", "Title", "Details"])
+        df['Logged'] = pd.to_datetime(df['Logged']).dt.date
         
-        # Filter Layout
         f_col1, f_col2, f_col3 = st.columns([1, 1, 2])
         with f_col1:
             cat_filter = st.multiselect("Filter by Category", categories)
@@ -101,7 +207,6 @@ with tab2:
         with f_col3:
             search_text = st.text_input("🔍 Search keyword (searches titles and notes)")
 
-        # Apply Pandas filtering logic dynamically
         filtered_df = df.copy()
         
         if cat_filter:
@@ -109,19 +214,14 @@ with tab2:
             
         if len(date_filter) == 2:
             start_d, end_d = date_filter
-            filtered_df = filtered_df[(filtered_df['Date'] >= start_d) & (filtered_df['Date'] <= end_d)]
+            filtered_df = filtered_df[(filtered_df['Logged'] >= start_d) & (filtered_df['Logged'] <= end_d)]
             
         if search_text:
-            # Case-insensitive search across both Title and Details columns
             mask = filtered_df['Title'].str.contains(search_text, case=False, na=False) | \
                    filtered_df['Details'].str.contains(search_text, case=False, na=False)
             filtered_df = filtered_df[mask]
 
-        st.dataframe(
-            filtered_df.drop(columns=["ID"]), 
-            use_container_width=True, 
-            hide_index=True
-        )
+        st.dataframe(filtered_df.drop(columns=["ID"]), use_container_width=True, hide_index=True)
     else:
         st.info("No logs found. Start typing in the Log Entry tab!")
 
@@ -129,13 +229,12 @@ with tab3:
     st.subheader("Upcoming Reminders")
     
     today_str = str(date.today())
-    # Fetch active reminders that haven't been sent yet
     reminders = client.execute(
         "SELECT id, title, reminder_date FROM life_logs WHERE reminder_date != '' AND reminder_sent = 0 ORDER BY reminder_date ASC"
     ).rows
     
     if reminders:
-        rem_df = pd.DataFrame(reminders, columns=["ID", "Task", "Due Date"])
+        rem_df = pd.DataFrame(reminders, columns=["ID", "Task", "Reminder Scheduled For"])
         st.dataframe(rem_df.drop(columns=["ID"]), use_container_width=True, hide_index=True)
         
         st.divider()
@@ -150,13 +249,11 @@ with tab3:
                 for row in reminders:
                     row_id, task_title, due_date = row
                     
-                    # Only send if the reminder date is today or has passed
                     if due_date <= today_str:
-                        subject = f"Reminder: {task_title}"
-                        body = f"This is an automated reminder for your logged task: {task_title} due on {due_date}."
+                        subject = f"Life Logger Reminder: {task_title}"
+                        body = f"This is an automated reminder for your logged task: {task_title}.\nScheduled for: {due_date}."
                         
                         if send_email_reminder(target_email, subject, body):
-                            # Mark as sent in DB so it doesn't send again
                             client.execute("UPDATE life_logs SET reminder_sent = 1 WHERE id = ?", [row_id])
                             sent_count += 1
                             
