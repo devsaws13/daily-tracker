@@ -160,9 +160,8 @@ with tab1:
             column_config={
                 "ID": None, 
                 "temp_due": None, 
-                # Changed width from "small" to "medium" so the header text fits
-                "Select": st.column_config.CheckboxColumn("🗑️ Select", default=False, width="medium"),
-                "Done": st.column_config.CheckboxColumn("Done?", default=False, width="medium"),
+                "Select": st.column_config.CheckboxColumn("🗑️", default=False, width="small"),
+                "Done": st.column_config.CheckboxColumn("Done?", default=False, width="small"),
                 "Logged": st.column_config.TextColumn(disabled=True),
                 "Due Date": st.column_config.TextColumn(disabled=True),
                 "Finished On": st.column_config.TextColumn(disabled=True),
@@ -170,7 +169,7 @@ with tab1:
                 "Title": st.column_config.TextColumn(disabled=True),
                 "Details": st.column_config.TextColumn(disabled=True)
             },
-            use_container_width=True, # Changed back to True to stop the dates from truncating
+            use_container_width=True,
             hide_index=True,
             key="dashboard_editor"
         )
@@ -257,7 +256,7 @@ with tab2:
             display_df,
             column_config={
                 "ID": None,
-                "Select": st.column_config.CheckboxColumn("🗑️ Select", default=False, width="medium"),
+                "Select": st.column_config.CheckboxColumn("🗑️", default=False, width="small"),
                 "Logged": st.column_config.TextColumn(disabled=True),
                 "Due": st.column_config.TextColumn(disabled=True),
                 "Finished": st.column_config.TextColumn(disabled=True),
@@ -265,7 +264,7 @@ with tab2:
                 "Title": st.column_config.TextColumn(disabled=True),
                 "Details": st.column_config.TextColumn(disabled=True)
             },
-            use_container_width=True, # Changed back to True
+            use_container_width=True,
             hide_index=True,
             key="search_editor"
         )
