@@ -146,13 +146,15 @@ with tab1:
             # Pending but future/today, leave blank
             return [''] * len(row)
             
-        styled_df = df.drop(columns=["temp_due"]).style.apply(highlight_due_status, axis=1)
+        # FIX: Do not drop "temp_due" before applying the style
+        styled_df = df.style.apply(highlight_due_status, axis=1)
         
         # Make the dataframe editable so the user can click "Done"
         edited_df = st.data_editor(
             styled_df,
             column_config={
                 "ID": None, # Hide ID
+                "temp_due": None, # FIX: Hide the helper column here instead
                 "Done": st.column_config.CheckboxColumn("Done?", default=False),
                 "Logged": st.column_config.TextColumn(disabled=True),
                 "Due Date": st.column_config.TextColumn(disabled=True),
@@ -167,7 +169,8 @@ with tab1:
         )
         
         # Check if the user toggled the "Done" checkbox
-        if not edited_df.equals(df.drop(columns=["temp_due"])):
+        # FIX: Compare against the full df since we didn't drop the column
+        if not edited_df.equals(df):
             for i, row in edited_df.iterrows():
                 original_done = df.loc[i, "Done"]
                 new_done = row["Done"]
