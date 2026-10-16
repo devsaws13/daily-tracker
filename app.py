@@ -173,17 +173,19 @@ else:
             LIMIT 50
         """, [current_user])
         
+        # ... inside Tab 1 ...
         if result.rows:
             df = pd.DataFrame(result.rows, columns=["ID", "Done", "Logged", "Due Date", "Finished On", "Category", "Title", "Details"])
             df["Done"] = df["Done"].astype(bool)
             df.insert(0, "Select", False)
             
             today = date.today()
-            df['temp_due'] = pd.to_datetime(df['Due Date']).dt.date
             
-            df['Logged'] = pd.to_datetime(df['Logged']).dt.strftime('%Y-%m-%d')
-            df['Due Date'] = pd.to_datetime(df['Due Date'], errors='coerce').dt.strftime('%Y-%m-%d').fillna('')
-            df['Finished On'] = pd.to_datetime(df['Finished On'], errors='coerce').dt.strftime('%Y-%m-%d').fillna('')
+            # Use errors='coerce' to prevent crashes, and keep them as actual Date objects for the calendar widget
+            df['Logged'] = pd.to_datetime(df['Logged'], errors='coerce').dt.date
+            df['Due Date'] = pd.to_datetime(df['Due Date'], errors='coerce').dt.date
+            df['Finished On'] = pd.to_datetime(df['Finished On'], errors='coerce').dt.date
+            df['temp_due'] = df['Due Date']
             
             def highlight_due_status(row):
                 is_done = row['Done']
@@ -209,9 +211,9 @@ else:
                         "temp_due": None, 
                         "Select": None, # Hide delete column in view mode
                         "Done": st.column_config.CheckboxColumn("Done?", disabled=True, width="small"),
-                        "Logged": st.column_config.TextColumn("Logged"),
-                        "Due Date": st.column_config.TextColumn("Due Date"),
-                        "Finished On": st.column_config.TextColumn("Finished On"),
+                        "Logged": st.column_config.DateColumn("Logged", format="YYYY-MM-DD"),
+                        "Due Date": st.column_config.DateColumn("Due Date", format="YYYY-MM-DD"),
+                        "Finished On": st.column_config.DateColumn("Finished On", format="YYYY-MM-DD"),
                         "Category": st.column_config.TextColumn("Category"),
                         "Title": st.column_config.TextColumn("Title"),
                         "Details": st.column_config.TextColumn("Details")
@@ -220,7 +222,7 @@ else:
                     hide_index=True
                 )
             else:
-                # EDIT MODE: Interactive Checkboxes and Editable Cells
+                # EDIT MODE: Interactive Checkboxes and Editable Calendar Cells
                 edited_df = st.data_editor(
                     styled_df,
                     column_config={
@@ -228,9 +230,10 @@ else:
                         "temp_due": None, 
                         "Select": st.column_config.CheckboxColumn("🗑️", default=False, width="small"),
                         "Done": st.column_config.CheckboxColumn("Done?", default=False, width="small"),
-                        "Logged": st.column_config.TextColumn("Logged (YYYY-MM-DD)"),
-                        "Due Date": st.column_config.TextColumn("Due Date (YYYY-MM-DD)"),
-                        "Finished On": st.column_config.TextColumn(disabled=True),
+                        # CHANGED to DateColumn to enable the calendar picker
+                        "Logged": st.column_config.DateColumn("Logged", format="YYYY-MM-DD"),
+                        "Due Date": st.column_config.DateColumn("Due Date", format="YYYY-MM-DD"),
+                        "Finished On": st.column_config.DateColumn("Finished On", format="YYYY-MM-DD", disabled=True),
                         "Category": st.column_config.SelectboxColumn("Category", options=categories),
                         "Title": st.column_config.TextColumn("Title"),
                         "Details": st.column_config.TextColumn("Details")
@@ -256,18 +259,24 @@ else:
                             client.execute("UPDATE life_logs SET is_done = 0, done_date = '' WHERE id = ? AND username = ?", [row_id, current_user])
                             updates_made = True
                             
-                        # 2. Check for inline text/dropdown edits
+                        # 2. Check for inline text/dropdown/calendar edits
                         c_cat = str(row['Category'])
                         c_tit = str(row['Title'])
                         c_det = str(row['Details']) if pd.notna(row['Details']) else ""
+                        
+                        # Safe parsing for dates coming out of the calendar widget
                         c_due = str(row['Due Date']) if pd.notna(row['Due Date']) else ""
                         c_log = str(row['Logged']) if pd.notna(row['Logged']) else ""
                         
+                        # Safe string comparisons against original dataframe objects
+                        orig_due = str(df.loc[i, "Due Date"]) if pd.notna(df.loc[i, "Due Date"]) else ""
+                        orig_log = str(df.loc[i, "Logged"]) if pd.notna(df.loc[i, "Logged"]) else ""
+                        
                         if (str(df.loc[i, "Category"]) != c_cat or 
                             str(df.loc[i, "Title"]) != c_tit or 
-                            str(df.loc[i, "Details"]) != c_det or 
-                            str(df.loc[i, "Due Date"]) != c_due or
-                            str(df.loc[i, "Logged"]) != c_log):
+                            (str(df.loc[i, "Details"]) if pd.notna(df.loc[i, "Details"]) else "") != c_det or 
+                            orig_due != c_due or
+                            orig_log != c_log):
                             
                             client.execute(
                                 "UPDATE life_logs SET category=?, title=?, details=?, due_date=?, log_date=? WHERE id=? AND username=?",
@@ -287,7 +296,7 @@ else:
                         st.rerun()
         else:
             st.info("Your dashboard is empty.")
-
+            
     with tab2:
         st.subheader("Effortless Search")
         result = client.execute("SELECT id, log_date, due_date, done_date, category, title, details FROM life_logs WHERE username = ? ORDER BY log_date DESC", [current_user])
