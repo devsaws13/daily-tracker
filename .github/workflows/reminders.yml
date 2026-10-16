@@ -1,0 +1,30 @@
+name: Daily Push Notifications
+
+on:
+  schedule:
+    # Runs at 10:00 AM IST (04:30 UTC)
+    - cron: '30 4 * * *'
+    # Runs at 04:00 PM IST (10:30 UTC)
+    - cron: '30 10 * * *'
+  workflow_dispatch: # Allows manual triggering from the GitHub Actions tab
+
+jobs:
+  dispatch_alerts:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install Dependencies
+        run: pip install libsql-client
+
+      - name: Run Alert Script
+        env:
+          TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+          TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
+        run: python cron_alerts.py
