@@ -17,7 +17,6 @@ def get_db():
 
 client = get_db()
 
-# Create users table
 client.execute("""
     CREATE TABLE IF NOT EXISTS users (
         username TEXT PRIMARY KEY,
@@ -25,7 +24,6 @@ client.execute("""
     )
 """)
 
-# Create life_logs table
 client.execute("""
     CREATE TABLE IF NOT EXISTS life_logs (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -42,7 +40,6 @@ client.execute("""
     )
 """)
 
-# Upgrade existing table if missing new columns (Backward compatibility)
 existing_cols = [col[1] for col in client.execute("PRAGMA table_info(life_logs)").rows]
 if "due_date" not in existing_cols:
     client.execute("ALTER TABLE life_logs ADD COLUMN due_date DATE")
@@ -116,7 +113,7 @@ else:
     with col_header:
         st.title(f"📓 {current_user}'s Daily Logger")
     with col_logout:
-        st.write("") # Padding
+        st.write("") 
         if st.button("Log Out"):
             del st.session_state['logged_in_user']
             st.rerun()
@@ -163,6 +160,7 @@ else:
                     st.rerun()
 
         st.subheader("Action Dashboard")
+        
         result = client.execute("""
             SELECT id, is_done, log_date, due_date, done_date, category, title, details 
             FROM life_logs 
@@ -194,49 +192,76 @@ else:
                 if pd.notna(due_date_val) and due_date_val < today: return ['background-color: #FFD1DC; color: black'] * len(row)
                 return [''] * len(row)
                 
-            styled_df = df.style.apply(highlight_due_status, axis=1)
+            styled_df = df.style.apply(highlight_due_status, axis=1).hide(axis="index")
             
-            edited_df = st.data_editor(
-                styled_df,
-                column_config={
-                    "ID": None, 
-                    "temp_due": None, 
-                    "Select": st.column_config.CheckboxColumn("🗑️", default=False, width="small"),
-                    "Done": st.column_config.CheckboxColumn("Done?", default=False, width="small"),
-                    "Logged": st.column_config.TextColumn(disabled=True),
-                    "Due Date": st.column_config.TextColumn(disabled=True),
-                    "Finished On": st.column_config.TextColumn(disabled=True),
-                    "Category": st.column_config.TextColumn(disabled=True),
-                    "Title": st.column_config.TextColumn(disabled=True),
-                    "Details": st.column_config.TextColumn(disabled=True)
-                },
-                use_container_width=True,
-                hide_index=True,
-                key="dashboard_editor"
-            )
-            
-            if not edited_df["Done"].equals(df["Done"]):
-                updates_made = False
-                for i, row in edited_df.iterrows():
-                    row_id = row["ID"]
-                    original_done = df.loc[i, "Done"]
-                    new_done = row["Done"]
-                    
-                    if not original_done and new_done:
-                        client.execute("UPDATE life_logs SET is_done = 1, done_date = ? WHERE id = ? AND username = ?", [str(today), row_id, current_user])
-                        updates_made = True
-                    elif original_done and not new_done:
-                        client.execute("UPDATE life_logs SET is_done = 0, done_date = '' WHERE id = ? AND username = ?", [row_id, current_user])
-                        updates_made = True
-                if updates_made: st.rerun()
+            col_toggle, col_text = st.columns([1, 3])
+            with col_toggle:
+                edit_mode = st.toggle("✏️ Enable Edit Mode")
+            with col_text:
+                st.write("Toggle on to mark tasks as Done, edit, or delete. Toggle off to sort columns.")
 
-            if edited_df["Select"].any():
-                deletions = edited_df[edited_df["Select"] == True]
-                st.error(f"⚠️ You have selected {len(deletions)} log(s) for deletion. This action cannot be undone.")
-                if st.button("Confirm Deletion", type="primary", key="dash_del_btn"):
-                    for del_id in deletions["ID"]:
-                        client.execute("DELETE FROM life_logs WHERE id = ? AND username = ?", [int(del_id), current_user])
-                    st.rerun()
+            if not edit_mode:
+                # VIEW MODE: Sortable
+                st.dataframe(
+                    styled_df,
+                    column_config={
+                        "ID": None, 
+                        "temp_due": None, 
+                        "Select": None, # Hide delete column in view mode
+                        "Done": st.column_config.CheckboxColumn("Done?", disabled=True, width="small"),
+                        "Logged": st.column_config.TextColumn("Logged"),
+                        "Due Date": st.column_config.TextColumn("Due Date"),
+                        "Finished On": st.column_config.TextColumn("Finished On"),
+                        "Category": st.column_config.TextColumn("Category"),
+                        "Title": st.column_config.TextColumn("Title"),
+                        "Details": st.column_config.TextColumn("Details")
+                    },
+                    use_container_width=True,
+                    hide_index=True
+                )
+            else:
+                # EDIT MODE: Interactive Checkboxes
+                edited_df = st.data_editor(
+                    styled_df,
+                    column_config={
+                        "ID": None, 
+                        "temp_due": None, 
+                        "Select": st.column_config.CheckboxColumn("🗑️", default=False, width="small"),
+                        "Done": st.column_config.CheckboxColumn("Done?", default=False, width="small"),
+                        "Logged": st.column_config.TextColumn(disabled=True),
+                        "Due Date": st.column_config.TextColumn(disabled=True),
+                        "Finished On": st.column_config.TextColumn(disabled=True),
+                        "Category": st.column_config.TextColumn(disabled=True),
+                        "Title": st.column_config.TextColumn(disabled=True),
+                        "Details": st.column_config.TextColumn(disabled=True)
+                    },
+                    use_container_width=True,
+                    hide_index=True,
+                    key="dashboard_editor"
+                )
+                
+                if not edited_df["Done"].equals(df["Done"]):
+                    updates_made = False
+                    for i, row in edited_df.iterrows():
+                        row_id = row["ID"]
+                        original_done = df.loc[i, "Done"]
+                        new_done = row["Done"]
+                        
+                        if not original_done and new_done:
+                            client.execute("UPDATE life_logs SET is_done = 1, done_date = ? WHERE id = ? AND username = ?", [str(today), row_id, current_user])
+                            updates_made = True
+                        elif original_done and not new_done:
+                            client.execute("UPDATE life_logs SET is_done = 0, done_date = '' WHERE id = ? AND username = ?", [row_id, current_user])
+                            updates_made = True
+                    if updates_made: st.rerun()
+
+                if edited_df["Select"].any():
+                    deletions = edited_df[edited_df["Select"] == True]
+                    st.error(f"⚠️ You have selected {len(deletions)} log(s) for deletion. This action cannot be undone.")
+                    if st.button("Confirm Deletion", type="primary", key="dash_del_btn"):
+                        for del_id in deletions["ID"]:
+                            client.execute("DELETE FROM life_logs WHERE id = ? AND username = ?", [int(del_id), current_user])
+                        st.rerun()
         else:
             st.info("Your dashboard is empty.")
 
