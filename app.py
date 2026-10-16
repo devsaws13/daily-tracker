@@ -76,33 +76,39 @@ if 'logged_in_user' not in st.session_state:
     login_tab, register_tab = st.tabs(["🔒 Log In", "📝 Create Account"])
     
     with login_tab:
-        user_input = st.text_input("Username", key="login_user")
-        pass_input = st.text_input("Password", type="password", key="login_pass")
-        if st.button("Log In", type="primary"):
-            if user_input and pass_input:
-                hashed_input = hash_password(pass_input)
-                result = client.execute("SELECT username FROM users WHERE username = ? AND password_hash = ?", [user_input, hashed_input])
-                if result.rows:
-                    st.session_state['logged_in_user'] = user_input
-                    st.rerun()
+        with st.form("login_form"):
+            user_input = st.text_input("Username")
+            pass_input = st.text_input("Password", type="password")
+            login_submitted = st.form_submit_button("Log In", type="primary")
+            
+            if login_submitted:
+                if user_input and pass_input:
+                    hashed_input = hash_password(pass_input)
+                    result = client.execute("SELECT username FROM users WHERE username = ? AND password_hash = ?", [user_input, hashed_input])
+                    if result.rows:
+                        st.session_state['logged_in_user'] = user_input
+                        st.rerun()
+                    else:
+                        st.error("Invalid username or password.")
                 else:
-                    st.error("Invalid username or password.")
-            else:
-                st.warning("Please enter both username and password.")
+                    st.warning("Please enter both username and password.")
                 
     with register_tab:
-        new_user = st.text_input("New Username", key="reg_user")
-        new_pass = st.text_input("New Password", type="password", key="reg_pass")
-        if st.button("Register"):
-            if new_user and new_pass:
-                hashed_new = hash_password(new_pass)
-                try:
-                    client.execute("INSERT INTO users (username, password_hash) VALUES (?, ?)", [new_user, hashed_new])
-                    st.success("Account created successfully! You can now log in.")
-                except:
-                    st.error("That username is already taken. Please choose another one.")
-            else:
-                st.warning("Please fill out all fields.")
+        with st.form("register_form"):
+            new_user = st.text_input("New Username")
+            new_pass = st.text_input("New Password", type="password")
+            reg_submitted = st.form_submit_button("Register")
+            
+            if reg_submitted:
+                if new_user and new_pass:
+                    hashed_new = hash_password(new_pass)
+                    try:
+                        client.execute("INSERT INTO users (username, password_hash) VALUES (?, ?)", [new_user, hashed_new])
+                        st.success("Account created successfully! You can now log in.")
+                    except:
+                        st.error("That username is already taken. Please choose another one.")
+                else:
+                    st.warning("Please fill out all fields.")
 
 # --- 4. Main Application UI ---
 else:
