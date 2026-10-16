@@ -9,7 +9,6 @@ import hashlib
 st.set_page_config(page_title="Life Logger", layout="wide")
 
 # --- 1. Database Setup ---
-@st.cache_resource
 def get_db():
     url = st.secrets["TURSO_DATABASE_URL"]
     token = st.secrets["TURSO_AUTH_TOKEN"]
@@ -296,7 +295,7 @@ else:
                         st.rerun()
         else:
             st.info("Your dashboard is empty.")
-            
+
     with tab2:
         st.subheader("Effortless Search")
         result = client.execute("SELECT id, log_date, due_date, done_date, category, title, details FROM life_logs WHERE username = ? ORDER BY log_date DESC", [current_user])
