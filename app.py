@@ -2,8 +2,7 @@ import streamlit as st
 import pandas as pd
 import libsql_client
 from datetime import date
-import smtplib
-from email.mime.text import MIMEText
+import urllib.request
 import hashlib
 
 st.set_page_config(page_title="Life Logger", layout="wide")
@@ -19,9 +18,15 @@ client = get_db()
 client.execute("""
     CREATE TABLE IF NOT EXISTS users (
         username TEXT PRIMARY KEY,
-        password_hash TEXT
+        password_hash TEXT,
+        ntfy_topic TEXT DEFAULT ''
     )
 """)
+
+# Upgrade users table if missing the ntfy topic column
+user_cols = [col[1] for col in client.execute("PRAGMA table_info(users)").rows]
+if "ntfy_topic" not in user_cols:
+    client.execute("ALTER TABLE users ADD COLUMN ntfy_topic TEXT DEFAULT ''")
 
 client.execute("""
     CREATE TABLE IF NOT EXISTS life_logs (
@@ -51,21 +56,22 @@ if "username" not in existing_cols:
 def hash_password(password):
     return hashlib.sha256(password.encode()).hexdigest()
 
-def send_email_reminder(to_email, subject, body):
+def send_ntfy_reminder(topic, title, message):
+    if not topic:
+        return False
     try:
-        sender = st.secrets["SMTP_EMAIL"]
-        password = st.secrets["SMTP_PASSWORD"]
-        msg = MIMEText(body)
-        msg['Subject'] = subject
-        msg['From'] = sender
-        msg['To'] = to_email
-
-        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
-            server.login(sender, password)
-            server.send_message(msg)
+        req = urllib.request.Request(
+            f"https://ntfy.sh/{topic}",
+            data=message.encode('utf-8'),
+            headers={
+                "Title": title.encode('utf-8'),
+                "Tags": "rotating_light,clipboard"
+            }
+        )
+        urllib.request.urlopen(req)
         return True
     except Exception as e:
-        st.error(f"Failed to send email: {e}")
+        st.error(f"NTFY Error: {e}")
         return False
 
 # --- 3. Authentication Gatekeeper ---
@@ -123,7 +129,7 @@ else:
             del st.session_state['logged_in_user']
             st.rerun()
 
-    tab1, tab2, tab3 = st.tabs(["📝 Dashboard & Log Entry", "🔍 Search & Filter", "⏰ Reminders"])
+    tab1, tab2, tab3 = st.tabs(["📝 Dashboard & Log Entry", "🔍 Search & Filter", "⏰ Reminders & NTFY"])
     categories = ["🚗 Vehicle", "💊 Health & Medical", "✈️ Travel", "💼 Work", "🏠 Home", "🌱 Other"]
 
     with tab1:
@@ -143,8 +149,9 @@ else:
                 set_due = st.checkbox("Set a Due Date?")
                 due_date = st.date_input("Due Date", value=date.today()) if set_due else None
             with scol2:
-                set_reminder = st.checkbox("Set an Email Reminder?")
-                reminder_date = st.date_input("Reminder Date", value=date.today()) if set_reminder else None
+                # The reminder date field is kept for database backward compatibility
+                set_reminder = st.checkbox("Enable Push Alerts?")
+                reminder_date = st.date_input("Start Alerts On", value=date.today()) if set_reminder else None
 
             if st.button("Save Log", type="primary", use_container_width=True):
                 if not title:
@@ -178,7 +185,6 @@ else:
             LIMIT 50
         """, [current_user])
         
-        # ... inside Tab 1 ...
         if result.rows:
             df = pd.DataFrame(result.rows, columns=["ID", "Done", "Logged", "Due Date", "Finished On", "Category", "Title", "Details"])
             df["Done"] = df["Done"].astype(bool)
@@ -186,7 +192,6 @@ else:
             
             today = date.today()
             
-            # Use errors='coerce' to prevent crashes, and keep them as actual Date objects for the calendar widget
             df['Logged'] = pd.to_datetime(df['Logged'], errors='coerce').dt.date
             df['Due Date'] = pd.to_datetime(df['Due Date'], errors='coerce').dt.date
             df['Finished On'] = pd.to_datetime(df['Finished On'], errors='coerce').dt.date
@@ -208,13 +213,12 @@ else:
                 st.write("Toggle on to mark tasks as Done, edit text, or delete. Toggle off to sort columns.")
 
             if not edit_mode:
-                # VIEW MODE: Sortable
                 st.dataframe(
                     styled_df,
                     column_config={
                         "ID": None, 
                         "temp_due": None, 
-                        "Select": None, # Hide delete column in view mode
+                        "Select": None,
                         "Done": st.column_config.CheckboxColumn("Done?", disabled=True, width="small"),
                         "Logged": st.column_config.DateColumn("Logged", format="YYYY-MM-DD"),
                         "Due Date": st.column_config.DateColumn("Due Date", format="YYYY-MM-DD"),
@@ -227,7 +231,6 @@ else:
                     hide_index=True
                 )
             else:
-                # EDIT MODE: Interactive Checkboxes and Editable Calendar Cells
                 edited_df = st.data_editor(
                     styled_df,
                     column_config={
@@ -235,7 +238,6 @@ else:
                         "temp_due": None, 
                         "Select": st.column_config.CheckboxColumn("🗑️", default=False, width="small"),
                         "Done": st.column_config.CheckboxColumn("Done?", default=False, width="small"),
-                        # CHANGED to DateColumn to enable the calendar picker
                         "Logged": st.column_config.DateColumn("Logged", format="YYYY-MM-DD"),
                         "Due Date": st.column_config.DateColumn("Due Date", format="YYYY-MM-DD"),
                         "Finished On": st.column_config.DateColumn("Finished On", format="YYYY-MM-DD", disabled=True),
@@ -248,13 +250,11 @@ else:
                     key="dashboard_editor"
                 )
                 
-                # Detect Changes
                 if not edited_df.drop(columns=["Select"]).equals(df.drop(columns=["Select"])):
                     updates_made = False
                     for i, row in edited_df.iterrows():
                         row_id = row["ID"]
                         
-                        # 1. Check for "Done" toggles
                         original_done = df.loc[i, "Done"]
                         new_done = row["Done"]
                         if not original_done and new_done:
@@ -264,16 +264,12 @@ else:
                             client.execute("UPDATE life_logs SET is_done = 0, done_date = '' WHERE id = ? AND username = ?", [row_id, current_user])
                             updates_made = True
                             
-                        # 2. Check for inline text/dropdown/calendar edits
                         c_cat = str(row['Category'])
                         c_tit = str(row['Title'])
                         c_det = str(row['Details']) if pd.notna(row['Details']) else ""
-                        
-                        # Safe parsing for dates coming out of the calendar widget
                         c_due = str(row['Due Date']) if pd.notna(row['Due Date']) else ""
                         c_log = str(row['Logged']) if pd.notna(row['Logged']) else ""
                         
-                        # Safe string comparisons against original dataframe objects
                         orig_due = str(df.loc[i, "Due Date"]) if pd.notna(df.loc[i, "Due Date"]) else ""
                         orig_log = str(df.loc[i, "Logged"]) if pd.notna(df.loc[i, "Logged"]) else ""
                         
@@ -358,37 +354,49 @@ else:
             st.info("No logs found. Start typing in the Log Entry tab!")
 
     with tab3:
-        st.subheader("Upcoming Reminders")
+        st.subheader("Active Tasks & Push Notifications")
+        
+        # NTFY Topic Management
+        user_topic_row = client.execute("SELECT ntfy_topic FROM users WHERE username = ?", [current_user]).rows[0]
+        current_topic = user_topic_row[0] if user_topic_row[0] else ""
+        
+        st.write("To receive native phone alerts, download the free **ntfy** app on your phone and subscribe to a unique, secret topic name. Enter that topic name below.")
+        colA, colB = st.columns(2)
+        with colA:
+            new_topic = st.text_input("Your NTFY Topic Name", value=current_topic, placeholder="e.g., my_secret_alerts_123")
+            if st.button("Save Topic"):
+                client.execute("UPDATE users SET ntfy_topic = ? WHERE username = ?", [new_topic, current_user])
+                st.success("NTFY Topic saved!")
+                st.rerun()
+        
+        st.divider()
         today_str = str(date.today())
-        reminders = client.execute(
-            "SELECT id, title, reminder_date FROM life_logs WHERE username = ? AND reminder_date != '' AND reminder_sent = 0 ORDER BY reminder_date ASC", [current_user]
-        ).rows
+        
+        # Query: Fetch all tasks that are NOT DONE and have a Due Date <= Today
+        reminders = client.execute("""
+            SELECT id, title, due_date 
+            FROM life_logs 
+            WHERE username = ? AND is_done = 0 AND due_date != '' AND due_date <= ?
+            ORDER BY due_date ASC
+        """, [current_user, today_str]).rows
         
         if reminders:
-            rem_df = pd.DataFrame(reminders, columns=["ID", "Task", "Reminder Scheduled For"])
+            st.warning(f"You have {len(reminders)} pending tasks due today or earlier. Alerts will trigger for these.")
+            rem_df = pd.DataFrame(reminders, columns=["ID", "Pending Task", "Due Date"])
             st.dataframe(rem_df.drop(columns=["ID"]), use_container_width=True, hide_index=True)
             
-            st.divider()
-            st.write("📧 **Email Dispatch**")
-            target_email = st.text_input("Send reminders to:", placeholder="your.email@gmail.com")
-            
-            if st.button("Dispatch Due Emails Now"):
-                if not target_email:
-                    st.error("Please enter a destination email.")
+            if st.button("Test Dispatch Alerts Now", type="primary"):
+                if not current_topic:
+                    st.error("Please set and save your NTFY Topic Name first.")
                 else:
                     sent_count = 0
                     for row in reminders:
-                        row_id, task_title, due_date = row
-                        if due_date <= today_str:
-                            subject = f"Life Logger Reminder: {task_title}"
-                            body = f"This is an automated reminder for your logged task: {task_title}.\nScheduled for: {due_date}."
-                            if send_email_reminder(target_email, subject, body):
-                                client.execute("UPDATE life_logs SET reminder_sent = 1 WHERE id = ? AND username = ?", [row_id, current_user])
-                                sent_count += 1
+                        task_title, due_date = row[1], row[2]
+                        message = f"DUE TASK: {task_title}\nDue Date: {due_date}"
+                        if send_ntfy_reminder(current_topic, "Life Logger Reminder", message):
+                            sent_count += 1
+                    
                     if sent_count > 0:
-                        st.success(f"Successfully dispatched {sent_count} email(s)!")
-                        st.rerun()
-                    else:
-                        st.info("No reminders are currently due for today.")
+                        st.success(f"Successfully dispatched {sent_count} alert(s) to your phone!")
         else:
-            st.success("All caught up! No pending reminders.")
+            st.success("All caught up! No pending tasks are currently due.")
