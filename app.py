@@ -219,49 +219,49 @@ else:
                     use_container_width=True,
                     hide_index=True
                 )
-            else:
-                # EDIT MODE: Interactive Checkboxes
-                edited_df = st.data_editor(
-                    styled_df,
-                    column_config={
-                        "ID": None, 
-                        "temp_due": None, 
-                        "Select": st.column_config.CheckboxColumn("🗑️", default=False, width="small"),
-                        "Done": st.column_config.CheckboxColumn("Done?", default=False, width="small"),
-                        "Logged": st.column_config.TextColumn(disabled=True),
-                        "Due Date": st.column_config.TextColumn(disabled=True),
-                        "Finished On": st.column_config.TextColumn(disabled=True),
-                        "Category": st.column_config.TextColumn(disabled=True),
-                        "Title": st.column_config.TextColumn(disabled=True),
-                        "Details": st.column_config.TextColumn(disabled=True)
-                    },
-                    use_container_width=True,
-                    hide_index=True,
-                    key="dashboard_editor"
-                )
-                
-                if not edited_df["Done"].equals(df["Done"]):
-                    updates_made = False
-                    for i, row in edited_df.iterrows():
-                        row_id = row["ID"]
-                        original_done = df.loc[i, "Done"]
-                        new_done = row["Done"]
-                        
-                        if not original_done and new_done:
-                            client.execute("UPDATE life_logs SET is_done = 1, done_date = ? WHERE id = ? AND username = ?", [str(today), row_id, current_user])
-                            updates_made = True
-                        elif original_done and not new_done:
-                            client.execute("UPDATE life_logs SET is_done = 0, done_date = '' WHERE id = ? AND username = ?", [row_id, current_user])
-                            updates_made = True
-                    if updates_made: st.rerun()
-
-                if edited_df["Select"].any():
-                    deletions = edited_df[edited_df["Select"] == True]
-                    st.error(f"⚠️ You have selected {len(deletions)} log(s) for deletion. This action cannot be undone.")
-                    if st.button("Confirm Deletion", type="primary", key="dash_del_btn"):
-                        for del_id in deletions["ID"]:
-                            client.execute("DELETE FROM life_logs WHERE id = ? AND username = ?", [int(del_id), current_user])
-                        st.rerun()
+                else:
+                    # EDIT MODE: Interactive Checkboxes
+                    edited_df = st.data_editor(
+                        styled_df,
+                        column_config={
+                            "ID": None, 
+                            "temp_due": None, 
+                            "Select": st.column_config.CheckboxColumn("🗑️", default=False, width="small"),
+                            "Done": st.column_config.CheckboxColumn("Done?", default=False, width="small"),
+                            "Logged": st.column_config.TextColumn(disabled=True),
+                            "Due Date": st.column_config.TextColumn(disabled=True),
+                            "Finished On": st.column_config.TextColumn(disabled=True),
+                            "Category": st.column_config.TextColumn(disabled=True),
+                            "Title": st.column_config.TextColumn(disabled=True),
+                            "Details": st.column_config.TextColumn(disabled=True)
+                        },
+                        use_container_width=True,
+                        hide_index=True,
+                        key="dashboard_editor"
+                    )
+            
+                    if not edited_df["Done"].equals(df["Done"]):
+                        updates_made = False
+                        for i, row in edited_df.iterrows():
+                            row_id = row["ID"]
+                            original_done = df.loc[i, "Done"]
+                            new_done = row["Done"]
+            
+                            if not original_done and new_done:
+                                client.execute("UPDATE life_logs SET is_done = 1, done_date = ? WHERE id = ? AND username = ?", [str(today), row_id, current_user])
+                                updates_made = True
+                            elif original_done and not new_done:
+                                client.execute("UPDATE life_logs SET is_done = 0, done_date = '' WHERE id = ? AND username = ?", [row_id, current_user])
+                                updates_made = True
+                        if updates_made: st.rerun()
+            
+                    if edited_df["Select"].any():
+                        deletions = edited_df[edited_df["Select"] == True]
+                        st.error(f"⚠️ You have selected {len(deletions)} log(s) for deletion. This action cannot be undone.")
+                        if st.button("Confirm Deletion", type="primary", key="dash_del_btn"):
+                            for del_id in deletions["ID"]:
+                                client.execute("DELETE FROM life_logs WHERE id = ? AND username = ?", [int(del_id), current_user])
+                            st.rerun()
         else:
             st.info("Your dashboard is empty.")
 
