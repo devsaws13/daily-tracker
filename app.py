@@ -149,7 +149,6 @@ else:
                 set_due = st.checkbox("Set a Due Date?")
                 due_date = st.date_input("Due Date", value=date.today()) if set_due else None
             with scol2:
-                # The reminder date field is kept for database backward compatibility
                 set_reminder = st.checkbox("Enable Push Alerts?")
                 reminder_date = st.date_input("Start Alerts On", value=date.today()) if set_reminder else None
 
@@ -187,6 +186,10 @@ else:
         
         if result.rows:
             df = pd.DataFrame(result.rows, columns=["ID", "Done", "Logged", "Due Date", "Finished On", "Category", "Title", "Details"])
+            
+            # FIX: Explicitly set the unique database ID as the dataframe index to stop Ghost-Checking
+            df.set_index("ID", inplace=True)
+            
             df["Done"] = df["Done"].astype(bool)
             df.insert(0, "Select", False)
             
@@ -204,7 +207,7 @@ else:
                 if pd.notna(due_date_val) and due_date_val < today: return ['background-color: #FFD1DC; color: black'] * len(row)
                 return [''] * len(row)
                 
-            styled_df = df.style.apply(highlight_due_status, axis=1).hide(axis="index")
+            styled_df = df.style.apply(highlight_due_status, axis=1)
             
             col_toggle, col_text = st.columns([1, 3])
             with col_toggle:
@@ -216,7 +219,6 @@ else:
                 st.dataframe(
                     styled_df,
                     column_config={
-                        "ID": None, 
                         "temp_due": None, 
                         "Select": None,
                         "Done": st.column_config.CheckboxColumn("Done?", disabled=True, width="small"),
@@ -231,12 +233,9 @@ else:
                     hide_index=True
                 )
             else:
-                # FIX: Pass the raw `df` to the editor instead of `styled_df` to prevent the ghost-checking bug.
-                # We drop 'temp_due' so it doesn't show up in the editor.
                 edited_df = st.data_editor(
                     df.drop(columns=["temp_due"]),
                     column_config={
-                        "ID": None, 
                         "Select": st.column_config.CheckboxColumn("🗑️", default=False, width="small"),
                         "Done": st.column_config.CheckboxColumn("Done?", default=False, width="small"),
                         "Logged": st.column_config.DateColumn("Logged", format="YYYY-MM-DD"),
@@ -251,15 +250,12 @@ else:
                     key="dashboard_editor"
                 )
                 
-                # Check if anything actually changed
                 if not edited_df.drop(columns=["Select"]).equals(df.drop(columns=["Select", "temp_due"])):
                     updates_made = False
                     
-                    for _, row in edited_df.iterrows():
-                        row_id = row["ID"]
-                        
-                        # Lookup exact row by Database ID to guarantee perfect alignment
-                        original_row = df[df["ID"] == row_id].iloc[0]
+                    # Because we set ID as the index, `row_id` is mathematically guaranteed to be correct
+                    for row_id, row in edited_df.iterrows():
+                        original_row = df.loc[row_id]
                         
                         original_done = original_row["Done"]
                         new_done = row["Done"]
@@ -299,7 +295,7 @@ else:
                     deletions = edited_df[edited_df["Select"] == True]
                     st.error(f"⚠️ You have selected {len(deletions)} log(s) for deletion. This action cannot be undone.")
                     if st.button("Confirm Deletion", type="primary", key="dash_del_btn"):
-                        for del_id in deletions["ID"]:
+                        for del_id in deletions.index:
                             client.execute("DELETE FROM life_logs WHERE id = ? AND username = ?", [int(del_id), current_user])
                         st.rerun()
         else:
@@ -311,6 +307,10 @@ else:
         
         if result.rows:
             df = pd.DataFrame(result.rows, columns=["ID", "Logged", "Due", "Finished", "Category", "Title", "Details"])
+            
+            # FIX: explicitly use the database ID as the index
+            df.set_index("ID", inplace=True)
+            
             df['Logged'] = pd.to_datetime(df['Logged']).dt.date
             
             f_col1, f_col2, f_col3 = st.columns([1, 1, 2])
@@ -336,7 +336,6 @@ else:
             edited_search_df = st.data_editor(
                 display_df,
                 column_config={
-                    "ID": None,
                     "Select": st.column_config.CheckboxColumn("🗑️", default=False, width="small"),
                     "Logged": st.column_config.TextColumn(disabled=True),
                     "Due": st.column_config.TextColumn(disabled=True),
@@ -354,7 +353,7 @@ else:
                 deletions = edited_search_df[edited_search_df["Select"] == True]
                 st.error(f"⚠️ You have selected {len(deletions)} log(s) for deletion. This action cannot be undone.")
                 if st.button("Confirm Deletion", type="primary", key="search_del_btn"):
-                    for del_id in deletions["ID"]:
+                    for del_id in deletions.index:
                         client.execute("DELETE FROM life_logs WHERE id = ? AND username = ?", [int(del_id), current_user])
                     st.rerun()
         else:
@@ -363,7 +362,6 @@ else:
     with tab3:
         st.subheader("Active Tasks & Push Notifications")
         
-        # NTFY Topic Management
         user_topic_row = client.execute("SELECT ntfy_topic FROM users WHERE username = ?", [current_user]).rows[0]
         current_topic = user_topic_row[0] if user_topic_row[0] else ""
         
@@ -379,7 +377,6 @@ else:
         st.divider()
         today_str = str(date.today())
         
-        # Query: Fetch all tasks that are NOT DONE and have a Due Date <= Today
         reminders = client.execute("""
             SELECT id, title, due_date 
             FROM life_logs 
@@ -390,7 +387,10 @@ else:
         if reminders:
             st.warning(f"You have {len(reminders)} pending tasks due today or earlier. Alerts will trigger for these.")
             rem_df = pd.DataFrame(reminders, columns=["ID", "Pending Task", "Due Date"])
-            st.dataframe(rem_df.drop(columns=["ID"]), use_container_width=True, hide_index=True)
+            
+            # Hide index visually, drop ID cleanly
+            rem_df.set_index("ID", inplace=True)
+            st.dataframe(rem_df, use_container_width=True, hide_index=True)
             
             if st.button("Test Dispatch Alerts Now", type="primary"):
                 if not current_topic:
