@@ -252,11 +252,17 @@ else:
                 
                 if not edited_df.drop(columns=["Select"]).equals(df.drop(columns=["Select"])):
                     updates_made = False
-                    for i, row in edited_df.iterrows():
+                    
+                    # FIX: Iterate through edited rows and lookup the exact original row by its unique database ID
+                    for _, row in edited_df.iterrows():
                         row_id = row["ID"]
                         
-                        original_done = df.loc[i, "Done"]
+                        # Find the exact matching row in the original un-edited dataframe
+                        original_row = df[df["ID"] == row_id].iloc[0]
+                        
+                        original_done = original_row["Done"]
                         new_done = row["Done"]
+                        
                         if not original_done and new_done:
                             client.execute("UPDATE life_logs SET is_done = 1, done_date = ? WHERE id = ? AND username = ?", [str(today), row_id, current_user])
                             updates_made = True
@@ -270,12 +276,12 @@ else:
                         c_due = str(row['Due Date']) if pd.notna(row['Due Date']) else ""
                         c_log = str(row['Logged']) if pd.notna(row['Logged']) else ""
                         
-                        orig_due = str(df.loc[i, "Due Date"]) if pd.notna(df.loc[i, "Due Date"]) else ""
-                        orig_log = str(df.loc[i, "Logged"]) if pd.notna(df.loc[i, "Logged"]) else ""
+                        orig_due = str(original_row["Due Date"]) if pd.notna(original_row["Due Date"]) else ""
+                        orig_log = str(original_row["Logged"]) if pd.notna(original_row["Logged"]) else ""
                         
-                        if (str(df.loc[i, "Category"]) != c_cat or 
-                            str(df.loc[i, "Title"]) != c_tit or 
-                            (str(df.loc[i, "Details"]) if pd.notna(df.loc[i, "Details"]) else "") != c_det or 
+                        if (str(original_row["Category"]) != c_cat or 
+                            str(original_row["Title"]) != c_tit or 
+                            (str(original_row["Details"]) if pd.notna(original_row["Details"]) else "") != c_det or 
                             orig_due != c_due or
                             orig_log != c_log):
                             
