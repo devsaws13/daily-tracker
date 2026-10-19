@@ -231,8 +231,9 @@ else:
                     hide_index=True
                 )
             else:
+                # EDIT MODE: Pass the raw `df` to avoid index scrambling bugs
                 edited_df = st.data_editor(
-                    styled_df,
+                    df,
                     column_config={
                         "ID": None, 
                         "temp_due": None, 
@@ -253,11 +254,10 @@ else:
                 if not edited_df.drop(columns=["Select"]).equals(df.drop(columns=["Select"])):
                     updates_made = False
                     
-                    # FIX: Iterate through edited rows and lookup the exact original row by its unique database ID
                     for _, row in edited_df.iterrows():
                         row_id = row["ID"]
                         
-                        # Find the exact matching row in the original un-edited dataframe
+                        # Lookup exact row by Database ID
                         original_row = df[df["ID"] == row_id].iloc[0]
                         
                         original_done = original_row["Done"]
