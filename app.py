@@ -231,12 +231,12 @@ else:
                     hide_index=True
                 )
             else:
-                # EDIT MODE: Pass the raw `df` to avoid index scrambling bugs
+                # FIX: Pass the raw `df` to the editor instead of `styled_df` to prevent the ghost-checking bug.
+                # We drop 'temp_due' so it doesn't show up in the editor.
                 edited_df = st.data_editor(
-                    df,
+                    df.drop(columns=["temp_due"]),
                     column_config={
                         "ID": None, 
-                        "temp_due": None, 
                         "Select": st.column_config.CheckboxColumn("🗑️", default=False, width="small"),
                         "Done": st.column_config.CheckboxColumn("Done?", default=False, width="small"),
                         "Logged": st.column_config.DateColumn("Logged", format="YYYY-MM-DD"),
@@ -251,13 +251,14 @@ else:
                     key="dashboard_editor"
                 )
                 
-                if not edited_df.drop(columns=["Select"]).equals(df.drop(columns=["Select"])):
+                # Check if anything actually changed
+                if not edited_df.drop(columns=["Select"]).equals(df.drop(columns=["Select", "temp_due"])):
                     updates_made = False
                     
                     for _, row in edited_df.iterrows():
                         row_id = row["ID"]
                         
-                        # Lookup exact row by Database ID
+                        # Lookup exact row by Database ID to guarantee perfect alignment
                         original_row = df[df["ID"] == row_id].iloc[0]
                         
                         original_done = original_row["Done"]
