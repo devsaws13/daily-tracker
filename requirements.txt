@@ -1,3 +1,5 @@
 streamlit
 pandas
 libsql-client
+Flask
+gunicorn
