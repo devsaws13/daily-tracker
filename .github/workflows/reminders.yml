@@ -1,11 +1,6 @@
 name: Daily Push Notifications
 
 on:
-  schedule:
-    # 10:17 AM IST (04:47 UTC) - Bypasses the 10:00/10:30 AM rush
-    - cron: '47 4 * * *'
-    # 04:17 PM IST (10:47 UTC) - Bypasses the 4:00/4:30 PM rush
-    - cron: '47 10 * * *'
   workflow_dispatch:
 
 jobs:
