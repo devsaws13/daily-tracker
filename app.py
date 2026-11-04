@@ -72,24 +72,7 @@ class TursoHTTPClient:
 def get_db():
     url = st.secrets["TURSO_DATABASE_URL"]
     token = st.secrets["TURSO_AUTH_TOKEN"]
-    db = TursoHTTPClient(url, token)
-    try:
-        db.execute("""
-            CREATE TABLE IF NOT EXISTS users (
-                username TEXT PRIMARY KEY,
-                password_hash TEXT,
-                ntfy_topic TEXT DEFAULT '',
-                last_ntfy_sync INTEGER DEFAULT 0
-            )
-        """)
-        user_cols = [col[1] for col in db.execute("PRAGMA table_info(users)").rows]
-        if "ntfy_topic" not in user_cols:
-            db.execute("ALTER TABLE users ADD COLUMN ntfy_topic TEXT DEFAULT ''")
-        if "last_ntfy_sync" not in user_cols:
-            db.execute("ALTER TABLE users ADD COLUMN last_ntfy_sync INTEGER DEFAULT 0")
-    except Exception as e:
-        print(f"Schema check warning: {e}")
-    return db
+    return TursoHTTPClient(url, token)
 
 client = get_db()
 
@@ -136,10 +119,17 @@ def send_ntfy_reminder(topic, title, message, actions_header=None):
         return False
 
 def sync_ntfy_replies_for_user(username):
-    rows = client.execute(
-        "SELECT ntfy_topic, COALESCE(last_ntfy_sync, 0) FROM users WHERE username = ?",
-        [username]
-    ).rows
+    try:
+        rows = client.execute(
+            "SELECT ntfy_topic, COALESCE(last_ntfy_sync, 0) FROM users WHERE username = ?",
+            [username]
+        ).rows
+    except Exception:
+        client.execute("ALTER TABLE users ADD COLUMN last_ntfy_sync INTEGER DEFAULT 0")
+        rows = client.execute(
+            "SELECT ntfy_topic, COALESCE(last_ntfy_sync, 0) FROM users WHERE username = ?",
+            [username]
+        ).rows
     if not rows or not rows[0][0]:
         return 0
 
