@@ -351,9 +351,17 @@ else:
             def highlight_due_status(row):
                 is_done = row['Done']
                 due_date_val = row['temp_due']
-                if is_done: return [''] * len(row)
-                if pd.notna(due_date_val) and due_date_val < today: return ['background-color: #FFD1DC; color: black'] * len(row)
+                if is_done or pd.isna(due_date_val):
+                    return [''] * len(row)
+                # Overdue (before today): soft rose tint
+                if due_date_val < today:
+                    return ['background-color: rgba(255, 99, 132, 0.16)'] * len(row)
+                # Due Today: soft warm amber tint
+                if due_date_val == today:
+                    return ['background-color: rgba(255, 193, 7, 0.16)'] * len(row)
                 return [''] * len(row)
+
+            styled_df = df.style.apply(highlight_due_status, axis=1)
                 
             styled_df = df.style.apply(highlight_due_status, axis=1)
             
