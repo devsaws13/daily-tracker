@@ -1,78 +1,241 @@
 import streamlit as st
 import pandas as pd
-import libsql_client
 from datetime import date
 import urllib.request
 import hashlib
+import json
+import re
+import requests
 
 st.set_page_config(page_title="Life Logger", layout="wide")
 
-# --- 1. Database Setup ---
-def get_db():
+# --- 1. Thread-Safe HTTP Wrapper for Turso (No libsql_client deadlock) ---
+class ResultRow(list):
+    pass
+
+class ResultSet:
+    def __init__(self, rows):
+        self.rows = [ResultRow(r) for r in rows]
+
+class TursoHTTPClient:
+    def __init__(self, url, token):
+        self.url = url.replace("libsql://", "https://").replace("wss://", "https://").rstrip("/")
+        self.headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json"
+        }
+
+    def execute(self, sql, args=None):
+        stmt = {"sql": sql}
+        if args:
+            formatted_args = []
+            for a in args:
+                if a is None:
+                    formatted_args.append({"type": "null"})
+                elif isinstance(a, bool):
+                    formatted_args.append({"type": "integer", "value": "1" if a else "0"})
+                elif isinstance(a, int):
+                    formatted_args.append({"type": "integer", "value": str(a)})
+                elif isinstance(a, float):
+                    formatted_args.append({"type": "float", "value": a})
+                else:
+                    formatted_args.append({"type": "text", "value": str(a)})
+            stmt["args"] = formatted_args
+
+        payload = {"requests": [{"type": "execute", "stmt": stmt}, {"type": "close"}]}
+        resp = requests.post(f"{self.url}/v2/pipeline", headers=self.headers, json=payload, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+
+        res = data["results"][0]
+        if res["type"] == "error":
+            raise RuntimeError(res["error"]["message"])
+
+        raw_rows = res["response"]["result"].get("rows", [])
+        parsed_rows = []
+        for row in raw_rows:
+            parsed_row = []
+            for cell in row:
+                if cell["type"] == "null":
+                    parsed_row.append(None)
+                elif cell["type"] == "integer":
+                    parsed_row.append(int(cell["value"]))
+                elif cell["type"] == "float":
+                    parsed_row.append(float(cell["value"]))
+                else:
+                    parsed_row.append(cell.get("value", ""))
+            parsed_rows.append(parsed_row)
+        return ResultSet(parsed_rows)
+
+@st.cache_resource
+def init_db():
     url = st.secrets["TURSO_DATABASE_URL"]
     token = st.secrets["TURSO_AUTH_TOKEN"]
-    return libsql_client.create_client_sync(url=url, auth_token=token)
+    db = TursoHTTPClient(url, token)
 
-client = get_db()
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            username TEXT PRIMARY KEY,
+            password_hash TEXT,
+            ntfy_topic TEXT DEFAULT '',
+            last_ntfy_sync INTEGER DEFAULT 0
+        )
+    """)
 
-client.execute("""
-    CREATE TABLE IF NOT EXISTS users (
-        username TEXT PRIMARY KEY,
-        password_hash TEXT,
-        ntfy_topic TEXT DEFAULT ''
-    )
-""")
+    user_cols = [col[1] for col in db.execute("PRAGMA table_info(users)").rows]
+    if "ntfy_topic" not in user_cols:
+        db.execute("ALTER TABLE users ADD COLUMN ntfy_topic TEXT DEFAULT ''")
+    if "last_ntfy_sync" not in user_cols:
+        db.execute("ALTER TABLE users ADD COLUMN last_ntfy_sync INTEGER DEFAULT 0")
 
-# Upgrade users table if missing the ntfy topic column
-user_cols = [col[1] for col in client.execute("PRAGMA table_info(users)").rows]
-if "ntfy_topic" not in user_cols:
-    client.execute("ALTER TABLE users ADD COLUMN ntfy_topic TEXT DEFAULT ''")
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS life_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT,
+            log_date DATE,
+            category TEXT,
+            title TEXT,
+            details TEXT,
+            due_date DATE,
+            is_done INTEGER DEFAULT 0,
+            done_date DATE,
+            reminder_date DATE,
+            reminder_sent INTEGER DEFAULT 0
+        )
+    """)
 
-client.execute("""
-    CREATE TABLE IF NOT EXISTS life_logs (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        username TEXT,
-        log_date DATE,
-        category TEXT,
-        title TEXT,
-        details TEXT,
-        due_date DATE,
-        is_done INTEGER DEFAULT 0,
-        done_date DATE,
-        reminder_date DATE,
-        reminder_sent INTEGER DEFAULT 0
-    )
-""")
+    existing_cols = [col[1] for col in db.execute("PRAGMA table_info(life_logs)").rows]
+    if "due_date" not in existing_cols:
+        db.execute("ALTER TABLE life_logs ADD COLUMN due_date DATE")
+        db.execute("ALTER TABLE life_logs ADD COLUMN is_done INTEGER DEFAULT 0")
+        db.execute("ALTER TABLE life_logs ADD COLUMN done_date DATE")
+    if "username" not in existing_cols:
+        db.execute("ALTER TABLE life_logs ADD COLUMN username TEXT DEFAULT 'admin'")
 
-existing_cols = [col[1] for col in client.execute("PRAGMA table_info(life_logs)").rows]
-if "due_date" not in existing_cols:
-    client.execute("ALTER TABLE life_logs ADD COLUMN due_date DATE")
-    client.execute("ALTER TABLE life_logs ADD COLUMN is_done INTEGER DEFAULT 0")
-    client.execute("ALTER TABLE life_logs ADD COLUMN done_date DATE")
-if "username" not in existing_cols:
-    client.execute("ALTER TABLE life_logs ADD COLUMN username TEXT DEFAULT 'admin'")
+    return db
+
+client = init_db()
 
 # --- 2. Helper Functions ---
 def hash_password(password):
     return hashlib.sha256(password.encode()).hexdigest()
 
-def send_ntfy_reminder(topic, title, message):
+def build_actions_header(topic, tasks):
+    if not tasks:
+        return None
+    all_ids_str = " ".join(str(t[0]) for t in tasks)
+    actions = []
+    if len(tasks) == 1:
+        t_id = tasks[0][0]
+        actions.append(f"http, Done #{t_id}, https://ntfy.sh/{topic}, body=done {t_id}, clear=true")
+    else:
+        for t in tasks[:2]:
+            t_id = t[0]
+            actions.append(f"http, Done #{t_id}, https://ntfy.sh/{topic}, body=done {t_id}")
+        actions.append(f"http, Done All, https://ntfy.sh/{topic}, body=done {all_ids_str}, clear=true")
+    return "; ".join(actions)
+
+def send_ntfy_reminder(topic, title, message, actions_header=None):
     if not topic:
         return False
     try:
+        headers = {
+            "Title": title.encode('utf-8'),
+            "Tags": "rotating_light,clipboard"
+        }
+        if actions_header:
+            headers["Actions"] = actions_header
+
         req = urllib.request.Request(
             f"https://ntfy.sh/{topic}",
             data=message.encode('utf-8'),
-            headers={
-                "Title": title.encode('utf-8'),
-                "Tags": "rotating_light,clipboard"
-            }
+            headers=headers,
+            method="POST"
         )
-        urllib.request.urlopen(req)
+        urllib.request.urlopen(req, timeout=10)
         return True
     except Exception as e:
         st.error(f"NTFY Error: {e}")
         return False
+
+def sync_ntfy_replies_for_user(username):
+    rows = client.execute(
+        "SELECT ntfy_topic, COALESCE(last_ntfy_sync, 0) FROM users WHERE username = ?",
+        [username]
+    ).rows
+    if not rows or not rows[0][0]:
+        return 0
+
+    topic, last_sync = rows[0][0], int(rows[0][1] or 0)
+    today_str = str(date.today())
+
+    try:
+        resp = requests.get(
+            f"https://ntfy.sh/{topic}/json?poll=1",
+            headers={"User-Agent": "LifeLogger/1.0"},
+            timeout=8
+        )
+        raw_text = resp.text
+    except Exception:
+        return 0
+
+    completed_ids = set()
+    mark_all = False
+    max_time = last_sync
+
+    for line in raw_text.strip().splitlines():
+        if not line.strip():
+            continue
+        try:
+            data = json.loads(line)
+        except Exception:
+            continue
+
+        if data.get("event") != "message":
+            continue
+
+        msg_time = int(data.get("time", 0))
+        if msg_time <= last_sync:
+            continue
+        if msg_time > max_time:
+            max_time = msg_time
+
+        if str(data.get("title", "")).startswith("Life Logger"):
+            continue
+
+        msg = str(data.get("message", "")).strip().lower()
+        if msg.startswith("done"):
+            if "all" in msg:
+                mark_all = True
+            ids = [int(x) for x in re.findall(r'\d+', msg)]
+            completed_ids.update(ids)
+
+    updated = 0
+    if mark_all:
+        client.execute(
+            """UPDATE life_logs 
+               SET is_done = 1, done_date = ? 
+               WHERE username = ? AND is_done = 0 AND due_date != '' AND due_date <= ?""",
+            [today_str, username, today_str]
+        )
+        updated += 1
+
+    for task_id in completed_ids:
+        client.execute(
+            """UPDATE life_logs 
+               SET is_done = 1, done_date = ? 
+               WHERE id = ? AND username = ? AND is_done = 0""",
+            [today_str, int(task_id), username]
+        )
+        updated += 1
+
+    if max_time > last_sync:
+        client.execute(
+            "UPDATE users SET last_ntfy_sync = ? WHERE username = ?",
+            [max_time, username]
+        )
+
+    return updated
 
 # --- 3. Authentication Gatekeeper ---
 if 'logged_in_user' not in st.session_state:
@@ -90,7 +253,10 @@ if 'logged_in_user' not in st.session_state:
             if login_submitted:
                 if user_input and pass_input:
                     hashed_input = hash_password(pass_input)
-                    result = client.execute("SELECT username FROM users WHERE username = ? AND password_hash = ?", [user_input, hashed_input])
+                    result = client.execute(
+                        "SELECT username FROM users WHERE username = ? AND password_hash = ?",
+                        [user_input, hashed_input]
+                    )
                     if result.rows:
                         st.session_state['logged_in_user'] = user_input
                         st.rerun()
@@ -109,9 +275,12 @@ if 'logged_in_user' not in st.session_state:
                 if new_user and new_pass:
                     hashed_new = hash_password(new_pass)
                     try:
-                        client.execute("INSERT INTO users (username, password_hash) VALUES (?, ?)", [new_user, hashed_new])
+                        client.execute(
+                            "INSERT INTO users (username, password_hash) VALUES (?, ?)",
+                            [new_user, hashed_new]
+                        )
                         st.success("Account created successfully! You can now log in.")
-                    except:
+                    except Exception:
                         st.error("That username is already taken. Please choose another one.")
                 else:
                     st.warning("Please fill out all fields.")
@@ -119,10 +288,22 @@ if 'logged_in_user' not in st.session_state:
 # --- 4. Main Application UI ---
 else:
     current_user = st.session_state['logged_in_user']
+
+    if 'ntfy_initial_sync' not in st.session_state:
+        sync_ntfy_replies_for_user(current_user)
+        st.session_state['ntfy_initial_sync'] = True
     
-    col_header, col_logout = st.columns([8, 1])
+    col_header, col_sync, col_logout = st.columns([7, 1.5, 1])
     with col_header:
         st.title(f"📓 {current_user}'s Daily Logger")
+    with col_sync:
+        st.write("")
+        if st.button("🔄 Sync Replies"):
+            count = sync_ntfy_replies_for_user(current_user)
+            if "dashboard_editor" in st.session_state:
+                del st.session_state["dashboard_editor"]
+            st.toast(f"Synced NTFY replies! ({count} action(s) applied)")
+            st.rerun()
     with col_logout:
         st.write("") 
         if st.button("Log Out"):
@@ -167,6 +348,8 @@ else:
                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                         [current_user, str(log_date), category, title, details, due_date_str, is_done_val, done_date_val, rem_date_str]
                     )
+                    if "dashboard_editor" in st.session_state:
+                        del st.session_state["dashboard_editor"]
                     st.success("Log saved successfully!")
                     st.rerun()
 
@@ -186,8 +369,6 @@ else:
         
         if result.rows:
             df = pd.DataFrame(result.rows, columns=["ID", "Done", "Logged", "Due Date", "Finished On", "Category", "Title", "Details"])
-            
-            # FIX: Explicitly set the unique database ID as the dataframe index to stop Ghost-Checking
             df.set_index("ID", inplace=True)
             
             df["Done"] = df["Done"].astype(bool)
@@ -253,7 +434,6 @@ else:
                 if not edited_df.drop(columns=["Select"]).equals(df.drop(columns=["Select", "temp_due"])):
                     updates_made = False
                     
-                    # Because we set ID as the index, `row_id` is mathematically guaranteed to be correct
                     for row_id, row in edited_df.iterrows():
                         original_row = df.loc[row_id]
                         
@@ -261,10 +441,10 @@ else:
                         new_done = row["Done"]
                         
                         if not original_done and new_done:
-                            client.execute("UPDATE life_logs SET is_done = 1, done_date = ? WHERE id = ? AND username = ?", [str(today), row_id, current_user])
+                            client.execute("UPDATE life_logs SET is_done = 1, done_date = ? WHERE id = ? AND username = ?", [str(today), int(row_id), current_user])
                             updates_made = True
                         elif original_done and not new_done:
-                            client.execute("UPDATE life_logs SET is_done = 0, done_date = '' WHERE id = ? AND username = ?", [row_id, current_user])
+                            client.execute("UPDATE life_logs SET is_done = 0, done_date = '' WHERE id = ? AND username = ?", [int(row_id), current_user])
                             updates_made = True
                             
                         c_cat = str(row['Category'])
@@ -288,7 +468,9 @@ else:
                             )
                             updates_made = True
 
-                    if updates_made: 
+                    if updates_made:
+                        if "dashboard_editor" in st.session_state:
+                            del st.session_state["dashboard_editor"]
                         st.rerun()
 
                 if edited_df["Select"].any():
@@ -297,6 +479,8 @@ else:
                     if st.button("Confirm Deletion", type="primary", key="dash_del_btn"):
                         for del_id in deletions.index:
                             client.execute("DELETE FROM life_logs WHERE id = ? AND username = ?", [int(del_id), current_user])
+                        if "dashboard_editor" in st.session_state:
+                            del st.session_state["dashboard_editor"]
                         st.rerun()
         else:
             st.info("Your dashboard is empty.")
@@ -307,8 +491,6 @@ else:
         
         if result.rows:
             df = pd.DataFrame(result.rows, columns=["ID", "Logged", "Due", "Finished", "Category", "Title", "Details"])
-            
-            # FIX: explicitly use the database ID as the index
             df.set_index("ID", inplace=True)
             
             df['Logged'] = pd.to_datetime(df['Logged']).dt.date
@@ -355,6 +537,8 @@ else:
                 if st.button("Confirm Deletion", type="primary", key="search_del_btn"):
                     for del_id in deletions.index:
                         client.execute("DELETE FROM life_logs WHERE id = ? AND username = ?", [int(del_id), current_user])
+                    if "search_editor" in st.session_state:
+                        del st.session_state["search_editor"]
                     st.rerun()
         else:
             st.info("No logs found. Start typing in the Log Entry tab!")
@@ -386,24 +570,23 @@ else:
         
         if reminders:
             st.warning(f"You have {len(reminders)} pending tasks due today or earlier. Alerts will trigger for these.")
-            rem_df = pd.DataFrame(reminders, columns=["ID", "Pending Task", "Due Date"])
-            
-            # Hide index visually, drop ID cleanly
-            rem_df.set_index("ID", inplace=True)
+            rem_df = pd.DataFrame(reminders, columns=["Task ID", "Pending Task", "Due Date"])
             st.dataframe(rem_df, use_container_width=True, hide_index=True)
             
             if st.button("Test Dispatch Alerts Now", type="primary"):
                 if not current_topic:
                     st.error("Please set and save your NTFY Topic Name first.")
                 else:
-                    sent_count = 0
-                    for row in reminders:
-                        task_title, due_date = row[1], row[2]
-                        message = f"DUE TASK: {task_title}\nDue Date: {due_date}"
-                        if send_ntfy_reminder(current_topic, "Life Logger Reminder", message):
-                            sent_count += 1
-                    
-                    if sent_count > 0:
-                        st.success(f"Successfully dispatched {sent_count} alert(s) to your phone!")
+                    lines = [f"• [#{r[0]}] {r[1]} (Due: {r[2]})" for r in reminders]
+                    message = (
+                        "Pending Tasks:\n"
+                        + "\n".join(lines)
+                        + "\n\nReply 'done <ID>' (e.g. done "
+                        + str(reminders[0][0])
+                        + ") or tap below:"
+                    )
+                    actions_hdr = build_actions_header(current_topic, reminders)
+                    if send_ntfy_reminder(current_topic, f"Life Logger ({len(reminders)} Due)", message, actions_hdr):
+                        st.success("Successfully dispatched interactive alert to your phone!")
         else:
             st.success("All caught up! No pending tasks are currently due.")
