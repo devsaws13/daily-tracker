@@ -9,7 +9,7 @@ import requests
 
 st.set_page_config(page_title="Life Logger", layout="wide")
 
-# --- 1. Thread-Safe HTTP Wrapper for Turso (No libsql_client deadlock) ---
+# --- 1. Thread-Safe HTTP Wrapper for Turso ---
 class ResultRow(list):
     pass
 
@@ -20,10 +20,11 @@ class ResultSet:
 class TursoHTTPClient:
     def __init__(self, url, token):
         self.url = url.replace("libsql://", "https://").replace("wss://", "https://").rstrip("/")
-        self.headers = {
+        self.session = requests.Session()
+        self.session.headers.update({
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json"
-        }
+        })
 
     def execute(self, sql, args=None):
         stmt = {"sql": sql}
@@ -43,7 +44,7 @@ class TursoHTTPClient:
             stmt["args"] = formatted_args
 
         payload = {"requests": [{"type": "execute", "stmt": stmt}, {"type": "close"}]}
-        resp = requests.post(f"{self.url}/v2/pipeline", headers=self.headers, json=payload, timeout=10)
+        resp = self.session.post(f"{self.url}/v2/pipeline", json=payload, timeout=10)
         resp.raise_for_status()
         data = resp.json()
 
@@ -68,53 +69,29 @@ class TursoHTTPClient:
         return ResultSet(parsed_rows)
 
 @st.cache_resource
-def init_db():
+def get_db():
     url = st.secrets["TURSO_DATABASE_URL"]
     token = st.secrets["TURSO_AUTH_TOKEN"]
     db = TursoHTTPClient(url, token)
-
-    db.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            username TEXT PRIMARY KEY,
-            password_hash TEXT,
-            ntfy_topic TEXT DEFAULT '',
-            last_ntfy_sync INTEGER DEFAULT 0
-        )
-    """)
-
-    user_cols = [col[1] for col in db.execute("PRAGMA table_info(users)").rows]
-    if "ntfy_topic" not in user_cols:
-        db.execute("ALTER TABLE users ADD COLUMN ntfy_topic TEXT DEFAULT ''")
-    if "last_ntfy_sync" not in user_cols:
-        db.execute("ALTER TABLE users ADD COLUMN last_ntfy_sync INTEGER DEFAULT 0")
-
-    db.execute("""
-        CREATE TABLE IF NOT EXISTS life_logs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT,
-            log_date DATE,
-            category TEXT,
-            title TEXT,
-            details TEXT,
-            due_date DATE,
-            is_done INTEGER DEFAULT 0,
-            done_date DATE,
-            reminder_date DATE,
-            reminder_sent INTEGER DEFAULT 0
-        )
-    """)
-
-    existing_cols = [col[1] for col in db.execute("PRAGMA table_info(life_logs)").rows]
-    if "due_date" not in existing_cols:
-        db.execute("ALTER TABLE life_logs ADD COLUMN due_date DATE")
-        db.execute("ALTER TABLE life_logs ADD COLUMN is_done INTEGER DEFAULT 0")
-        db.execute("ALTER TABLE life_logs ADD COLUMN done_date DATE")
-    if "username" not in existing_cols:
-        db.execute("ALTER TABLE life_logs ADD COLUMN username TEXT DEFAULT 'admin'")
-
+    try:
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                username TEXT PRIMARY KEY,
+                password_hash TEXT,
+                ntfy_topic TEXT DEFAULT '',
+                last_ntfy_sync INTEGER DEFAULT 0
+            )
+        """)
+        user_cols = [col[1] for col in db.execute("PRAGMA table_info(users)").rows]
+        if "ntfy_topic" not in user_cols:
+            db.execute("ALTER TABLE users ADD COLUMN ntfy_topic TEXT DEFAULT ''")
+        if "last_ntfy_sync" not in user_cols:
+            db.execute("ALTER TABLE users ADD COLUMN last_ntfy_sync INTEGER DEFAULT 0")
+    except Exception as e:
+        print(f"Schema check warning: {e}")
     return db
 
-client = init_db()
+client = get_db()
 
 # --- 2. Helper Functions ---
 def hash_password(password):
